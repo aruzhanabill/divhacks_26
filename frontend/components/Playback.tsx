@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMap } from "@vis.gl/react-google-maps";
 import { useFollowLive, usePublishFollow, type RevealedCall } from "@/lib/follow";
-import { CrimeGlyph, crimePinElement } from "@/lib/crimePin";
+import { CrimeGlyph, crimePinElement, lightPinElement } from "@/lib/crimePin";
 import { useTheme } from "@/lib/theme";
 import {
   CATEGORIES,
@@ -13,6 +13,7 @@ import {
   formatNyc,
   type Category,
   type Incident,
+  type StreetLight,
 } from "@/lib/incidents";
 
 const WINDOWS = [
@@ -51,6 +52,7 @@ export function Playback() {
   const [heatmapOn, setHeatmapOn] = useState(false);
   const [latestLabel, setLatestLabel] = useState<string | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [streetLights, setStreetLights] = useState<StreetLight[]>([]);
   const [batchId, setBatchId] = useState("");
   const [replayStart, setReplayStart] = useState<string | null>(null);
   const [replayEnd, setReplayEnd] = useState<string | null>(null);
@@ -79,6 +81,7 @@ export function Playback() {
   const playingRef = useRef(playing);
   const pitchRef = useRef(pitchSeconds);
   const incidentsRef = useRef(incidents);
+  const streetLightsRef = useRef(streetLights);
   const categoriesRef = useRef(categories);
   const startRef = useRef<number | null>(null);
   const endRef = useRef<number | null>(null);
@@ -90,6 +93,7 @@ export function Playback() {
   playingRef.current = playing;
   pitchRef.current = pitchSeconds;
   incidentsRef.current = incidents;
+  streetLightsRef.current = streetLights;
   categoriesRef.current = categories;
   heatmapOnRef.current = heatmapOn;
   startRef.current = replayStart ? Date.parse(replayStart) : null;
@@ -103,6 +107,53 @@ export function Playback() {
     seenSeek.current = seek.id;
     progressRef.current = seek.progress;
   }
+
+  useEffect(() => {
+    if (!replayStart || !replayEnd) return;
+    let cancelled = false;
+    const pull = async () => {
+      const params = new URLSearchParams({ start: replayStart, end: replayEnd });
+      try {
+        const response = await fetch(`/api/incidents?${params.toString()}`);
+        if (!response.ok) return;
+        const payload = (await response.json()) as { incidents: Incident[]; street_lights?: StreetLight[] };
+        if (cancelled) return;
+        const incoming = payload.incidents ?? [];
+        const incomingLights = payload.street_lights ?? [];
+        setIncidents((current) => {
+          const known = new Set(current.map((item) => item.source_id));
+          const extra = incoming.filter((item) => !known.has(item.source_id));
+          if (extra.length === 0) return current;
+          const photonCats = extra
+            .filter((item) => item.source_id.startsWith("photon:"))
+            .map((item) => item.category);
+          if (photonCats.length > 0) {
+            setCategories((selected) => {
+              const next = [...selected];
+              for (const category of photonCats) {
+                if (!next.includes(category)) next.push(category);
+              }
+              return next;
+            });
+          }
+          return [...current, ...extra];
+        });
+        setStreetLights((current) => {
+          const known = new Set(current.map((item) => item.source_id));
+          const extra = incomingLights.filter((item) => !known.has(item.source_id));
+          return extra.length === 0 ? current : [...current, ...extra];
+        });
+      } catch {
+        /* keep the loaded window if the live poll fails */
+      }
+    };
+    void pull();
+    const timer = window.setInterval(() => void pull(), 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [replayStart, replayEnd]);
 
   useEffect(() => {
     let cancelled = false;
@@ -177,7 +228,13 @@ export function Playback() {
       const visible = incidentsRef.current.filter(
         (incident) => allowed.has(incident.category) && Date.parse(incident.timestamp) <= simMsValue,
       );
-      const visibleIds = new Set(visible.map((incident) => incident.source_id));
+      const visibleLights = streetLightsRef.current.filter(
+        (light) => Date.parse(light.timestamp) <= simMsValue,
+      );
+      const visibleIds = new Set([
+        ...visible.map((incident) => incident.source_id),
+        ...visibleLights.map((light) => `light:${light.source_id}`),
+      ]);
       for (const [id, marker] of markers) {
         if (!visibleIds.has(id)) {
           marker.map = null;
@@ -210,6 +267,32 @@ export function Playback() {
         markers.set(incident.source_id, marker);
       }
 
+      for (const light of visibleLights) {
+        const id = `light:${light.source_id}`;
+        if (markers.has(id) || !Pin) continue;
+        const marker = new Pin({
+          map,
+          position: { lat: light.lat, lng: light.lng },
+          content: lightPinElement(),
+          title: "Street light out",
+        });
+        marker.addListener("click", () => {
+          const when = new Intl.DateTimeFormat("en-US", {
+            timeZone: "America/New_York",
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+            second: "2-digit",
+          }).format(new Date(light.timestamp));
+          infoRef.current?.setContent(
+            `<div class="callout"><strong>Street light out</strong><span>${when}</span></div>`,
+          );
+          infoRef.current?.open({ map, anchor: marker });
+        });
+        markers.set(id, marker);
+      }
+
       const signature = `${heatmapOnRef.current}:${categoriesRef.current.join(",")}:${visible.length}:${visible.at(-1)?.source_id ?? ""}`;
       const heat = heatRef.current;
       if (heat && signature !== heatSignature) {
@@ -222,7 +305,7 @@ export function Playback() {
         );
         heat.setMap(heatmapOnRef.current ? map : null);
       }
-      return visible.length;
+      return visible.length + visibleLights.length;
     };
 
     const tick = (now: number) => {
@@ -325,10 +408,12 @@ export function Playback() {
       if (!incidentsResponse.ok) throw new Error(await readError(incidentsResponse));
       const payload = (await incidentsResponse.json()) as {
         incidents: Incident[];
+        street_lights?: StreetLight[];
         start: string;
         end: string;
       };
       setIncidents(payload.incidents);
+      setStreetLights(payload.street_lights ?? []);
       setReplayStart(payload.start);
       setReplayEnd(payload.end);
       setBatchId(`${payload.start}:${payload.incidents.length}:${Date.now()}`);
@@ -405,6 +490,8 @@ export function Playback() {
         </label>
         <p className="mt-1 text-xs text-[var(--muted)]">
           {latestLabel ? `Latest call in the dataset: ${latestLabel}` : "Times are New York local."}
+          {" "}
+          Photos texted to the Photon number land on this clock.
         </p>
 
         <p className="hud-label mt-3">History in this replay</p>
@@ -496,7 +583,9 @@ export function Playback() {
         <div className="mt-3 flex items-baseline justify-between">
           <strong className="text-2xl font-semibold tabular-nums">{visibleCount}</strong>
           <span className="text-xs text-[var(--muted)]">
-            {status === "ready" ? `of ${filteredTotal} shown · ${incidents.length} stored` : "nothing loaded"}
+            {status === "ready"
+              ? `of ${filteredTotal} shown · ${incidents.length} stored${streetLights.length ? ` · ${streetLights.length} dark lamps` : ""}`
+              : "nothing loaded"}
           </span>
         </div>
         <input

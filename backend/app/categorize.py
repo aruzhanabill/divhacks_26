@@ -70,6 +70,18 @@ _RULES: tuple[tuple[str, float, tuple[str, ...]], ...] = (
 
 _CRITICAL_CIP = frozenset({"CIP", "CRITICAL", "YES", "Y"})
 
+# Closed set used by the map, minus `other`. Citizen photo reports use these.
+INCIDENT_CATEGORIES = (
+    "violent",
+    "property",
+    "disorder",
+    "alarm",
+    "traffic",
+    "medical",
+    "admin",
+)
+CATEGORY_SEVERITY = {name: weight for name, weight, _ in _RULES}
+
 
 def categorize(typ_desc: str | None, cip_jobs: str | None) -> tuple[str, float]:
     text = (typ_desc or "").upper()

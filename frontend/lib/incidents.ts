@@ -11,11 +11,10 @@ export const CATEGORIES = [
 
 export type Category = (typeof CATEGORIES)[number];
 
-export type Incident = {
+export type StreetLight = {
   source_id: string;
   lat: number;
   lng: number;
-  category: Category;
   severity: number;
   timestamp: string;
 };

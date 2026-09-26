@@ -41,4 +41,18 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000). Pick a start time inside the dataset (currently through June 30, 2026), a history window, and a playback length, then Load and Play.
 
+## Photon photo reports
+
+Text the Photon iMessage line a still of a broken street lamp, crash, or one of the seven mapped categories (violent, property, disorder, alarm, traffic, medical, admin). The agent reads the image, geocodes it (EXIF GPS, a cross-street in the caption, or the optional default pin), and upserts `incidents` or `street_lights` at `sim_now`.
+
+```bash
+cd photon
+cp .env.example .env
+# SPECTRUM_PROJECT_ID / SPECTRUM_PROJECT_SECRET
+npm install
+npm run dev
+```
+
+Keep that process running so Spectrum can stream inbound iMessages. In `backend/.env` set `OPENAI_API_KEY` so a photo can be classified. Without it, a caption like `car crash at 40.8075, -73.9626` still ingest. Optional `GOOGLE_MAPS_GEOCODE_KEY` turns a cross-street into coordinates. Optional `PHOTON_DEFAULT_LAT` / `PHOTON_DEFAULT_LNG` is a demo pin when the photo has no location.
+
 Docker alternative, from the repo root: `docker compose up -d`, and point `DATABASE_URL` at `postgresql://safepath:safepath@localhost:5432/safepath`.

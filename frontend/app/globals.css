@@ -104,9 +104,9 @@ body {
   animation: emerge 220ms ease-out both;
 }
 
-.crime-pin svg {
-  width: 16px;
-  height: 16px;
+.crime-pin.light-pin {
+  background: #facc15;
+  color: #071422;
 }
 
 .crime-pin-inline {
