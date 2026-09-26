@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMap } from "@vis.gl/react-google-maps";
+import { useFollowLive, usePublishFollow, type RevealedCall } from "@/lib/follow";
 import {
   CATEGORIES,
   CATEGORY_COLOR,
@@ -57,9 +58,17 @@ export function Playback() {
   const [visibleCount, setVisibleCount] = useState(0);
   const [status, setStatus] = useState<"idle" | "loading" | "ready">("idle");
   const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
   const [seek, setSeek] = useState<Seek | null>(null);
   const startEdited = useRef(false);
   const lastClockPush = useRef(0);
+  const publishFollow = usePublishFollow();
+  const publishFollowRef = useRef(publishFollow);
+  const live = useFollowLive();
+  const liveRef = useRef(live);
+  const lastPublishedKey = useRef("");
+  publishFollowRef.current = publishFollow;
+  liveRef.current = live;
 
   const markersRef = useRef<Map<string, google.maps.Marker>>(new Map());
   const infoRef = useRef<google.maps.InfoWindow | null>(null);
@@ -153,7 +162,7 @@ export function Playback() {
         if (batch.length > 0) {
           const bounds = new google.maps.LatLngBounds();
           for (const incident of batch) bounds.extend({ lat: incident.lat, lng: incident.lng });
-          map.fitBounds(bounds, { top: 48, right: 48, bottom: 48, left: 380 });
+          map.fitBounds(bounds, { top: 72, right: 48, bottom: 160, left: 48 });
         }
       }
 
@@ -169,14 +178,11 @@ export function Playback() {
         }
       }
 
-      const freshCount = visible.filter((incident) => !markers.has(incident.source_id)).length;
-      const animate = freshCount > 0 && freshCount <= 12;
       for (const incident of visible) {
         if (markers.has(incident.source_id)) continue;
         const marker = new google.maps.Marker({
           map,
           position: { lat: incident.lat, lng: incident.lng },
-          animation: animate ? google.maps.Animation.DROP : undefined,
           icon: {
             path: google.maps.SymbolPath.CIRCLE,
             scale: 5 + Math.min(incident.severity, 5) * 0.6,
@@ -231,6 +237,35 @@ export function Playback() {
       const progressValue = progressRef.current;
       const simValue = start != null && end != null ? start + progressValue * (end - start) : (start ?? 0);
       const visible = draw(simValue);
+      liveRef.current.playing = playingRef.current;
+      liveRef.current.progress = progressRef.current;
+      liveRef.current.simMs = start != null ? simValue : null;
+      const crimeCalls: RevealedCall[] = incidentsRef.current
+        .filter(
+          (incident) =>
+            Date.parse(incident.timestamp) <= simValue &&
+            (incident.category === "violent" ||
+              incident.category === "property" ||
+              incident.category === "disorder" ||
+              incident.category === "alarm"),
+        )
+        .map((incident) => ({
+          source_id: incident.source_id,
+          lat: incident.lat,
+          lng: incident.lng,
+          category: incident.category,
+          timestamp: incident.timestamp,
+        }));
+      const publishedKey = `${playingRef.current}:${crimeCalls.map((call) => call.source_id).join(",")}`;
+      if (publishedKey !== lastPublishedKey.current) {
+        lastPublishedKey.current = publishedKey;
+        publishFollowRef.current({
+          playing: playingRef.current,
+          progress: progressRef.current,
+          simMs: simValue,
+          calls: crimeCalls,
+        });
+      }
       if (start != null && now - lastEmit > 100) {
         lastEmit = now;
         setProgress(progressValue);
@@ -271,7 +306,6 @@ export function Playback() {
     return incidents.filter((incident) => allowed.has(incident.category)).length;
   }, [incidents, categories]);
 
-  const speed = Math.round((windowMinutes * 60) / pitchSeconds);
   const clockText = simMs != null ? formatNyc(simMs) : "Load a window to start";
 
   const loadCalls = useCallback(async () => {
@@ -326,12 +360,25 @@ export function Playback() {
   }
 
   return (
-    <div className="rounded-xl bg-white/95 p-3 shadow-lg ring-1 ring-zinc-200 backdrop-blur">
-        <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">Calls for Service</p>
-        <p className="mt-1 text-sm font-medium text-zinc-900">{clockText}</p>
-        <p className="mt-1 text-xs leading-relaxed text-zinc-500">
-          Historical 911 calls appear when the simulation reaches the moment each call was logged.
-        </p>
+    <div className="m-3 w-[min(100vw-1.5rem,22rem)] rounded-xl bg-white/95 shadow-lg ring-1 ring-zinc-200 backdrop-blur">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left"
+      >
+        <span>
+          <span className="block text-xs font-medium uppercase tracking-wide text-zinc-500">
+            Calls for Service
+          </span>
+          <span className="block text-sm font-medium text-zinc-900">{clockText}</span>
+        </span>
+        <svg viewBox="0 0 20 20" className={`h-4 w-4 text-zinc-500 ${open ? "rotate-180" : ""}`} aria-hidden="true">
+          <path fill="currentColor" d="M5.2 7.6 10 12.4l4.8-4.8 1.2 1.2L10 14.8 4 8.8z" />
+        </svg>
+      </button>
+      {open ? (
+        <div className="max-h-[min(70dvh,36rem)] overflow-auto px-3 pb-3">
 
         <label className="mt-3 block text-xs font-medium text-zinc-500">
           Starting time
@@ -386,9 +433,6 @@ export function Playback() {
             </button>
           ))}
         </div>
-        <p className="mt-1 text-xs text-zinc-500">
-          {windowMinutes} min of calls appear over {pitchSeconds}s ({speed}×).
-        </p>
 
         <p className="mt-3 text-xs font-medium text-zinc-500">Show on the map</p>
         <div className="mt-1 flex flex-wrap gap-1">
@@ -465,7 +509,9 @@ export function Playback() {
           onChange={(event) => scrub(Number(event.target.value) / 1000)}
           className="mt-1 w-full accent-orange-700"
         />
-      {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
+        {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
+        </div>
+      ) : null}
     </div>
   );
 }

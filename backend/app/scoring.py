@@ -52,6 +52,7 @@ class RouteCandidate(BaseModel):
 class ScoreRequest(BaseModel):
     routes: list[RouteCandidate] = Field(min_length=1, max_length=6)
     corridor_meters: float = Field(default=DEFAULT_CORRIDOR_METERS, ge=50, le=500)
+    sim_now: datetime | None = None
 
 
 def decode_polyline(encoded: str) -> list[tuple[float, float]]:
@@ -106,7 +107,7 @@ def _wkt(points: list[tuple[float, float]]) -> str:
     return f"SRID=4326;LINESTRING({body})"
 
 
-def _window() -> tuple[datetime, datetime, datetime]:
+def _window(requested: datetime | None = None) -> tuple[datetime, datetime, datetime]:
     with pool.connection() as conn:
         row = conn.execute(
             "SELECT sim_now, replay_start, replay_end FROM sim_state WHERE id = 1"
@@ -117,10 +118,11 @@ def _window() -> tuple[datetime, datetime, datetime]:
             detail="load calls before scoring routes",
         )
     sim_now, replay_start, replay_end = (as_nyc(value) for value in row)
-    anchor = sim_now if sim_now > replay_start else replay_end
-    if anchor < replay_start:
-        anchor = replay_end
-    return replay_start, replay_end, anchor
+    if requested is not None:
+        sim_now = as_nyc(requested)
+    if replay_start < sim_now <= replay_end:
+        return replay_start, sim_now, sim_now
+    return replay_start, replay_end, replay_end
 
 
 def _safety_score(weight: float) -> float:
@@ -128,7 +130,7 @@ def _safety_score(weight: float) -> float:
 
 
 def score_routes(body: ScoreRequest) -> dict:
-    start, end, anchor = _window()
+    start, end, anchor = _window(body.sim_now)
     if end < start:
         end = start
     results = []

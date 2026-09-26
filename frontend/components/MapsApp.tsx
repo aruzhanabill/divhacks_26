@@ -7,6 +7,7 @@ import { PlaceMarker } from "@/components/PlaceMarker";
 import { PlaceSearch } from "@/components/PlaceSearch";
 import { Playback } from "@/components/Playback";
 import { RoutePanel } from "@/components/RoutePanel";
+import { FollowProvider } from "@/lib/follow";
 import type { SelectedPlace } from "@/lib/googleMaps";
 
 type MapsAppProps = {
@@ -44,20 +45,24 @@ export function MapsApp({ apiKey }: MapsAppProps) {
   }
 
   return (
-    <MapCanvas apiKey={apiKey}>
-      <PlaceMarker place={place} />
-      <MapControl position={ControlPosition.TOP_LEFT}>
-        <div className="m-2 flex max-h-[calc(100dvh-1rem)] w-[min(100vw-1rem,22rem)] flex-col gap-3 overflow-auto">
-          <PlaceSearch onPlaceSelect={onPlaceSelect} error={placeError} />
-          <RoutePanel
-            origin={origin}
-            destination={destination}
-            onOriginSelect={setOrigin}
-            onDestinationSelect={setDestination}
-          />
+    <FollowProvider>
+      <MapCanvas apiKey={apiKey}>
+        <PlaceMarker place={place} />
+        <MapControl position={ControlPosition.TOP_LEFT}>
+          <div className="flex items-start">
+            <PlaceSearch onPlaceSelect={onPlaceSelect} error={placeError} />
+            <RoutePanel
+              origin={origin}
+              destination={destination}
+              onOriginSelect={setOrigin}
+              onDestinationSelect={setDestination}
+            />
+          </div>
+        </MapControl>
+        <MapControl position={ControlPosition.LEFT_BOTTOM}>
           <Playback />
-        </div>
-      </MapControl>
-    </MapCanvas>
+        </MapControl>
+      </MapCanvas>
+    </FollowProvider>
   );
 }
