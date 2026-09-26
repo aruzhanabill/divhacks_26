@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import {
   GOOGLE_MAP_ID,
   MAP_LIBRARIES,
+  MAPS_JS_VERSION,
   NYC_CENTER,
   NYC_DEFAULT_ZOOM,
 } from "@/lib/googleMaps";
@@ -16,7 +17,7 @@ type MapCanvasProps = {
 
 export function MapCanvas({ apiKey, children }: MapCanvasProps) {
   return (
-    <APIProvider apiKey={apiKey} libraries={MAP_LIBRARIES}>
+    <APIProvider apiKey={apiKey} libraries={MAP_LIBRARIES} version={MAPS_JS_VERSION}>
       <div className="relative h-dvh w-full">
         <Map
           className="absolute inset-0 h-full w-full"
