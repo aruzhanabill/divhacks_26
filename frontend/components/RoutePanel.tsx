@@ -360,14 +360,9 @@ export function RoutePanel({
   const preferenceCount = Number(preferSafe) + Number(preferLit);
 
   return (
-    <div
-      className="m-3 mt-20"
-      ref={(node) => {
-        if (node?.parentElement) node.parentElement.style.zIndex = "3";
-      }}
-    >
+    <div className="w-full">
       {open ? (
-        <div className="hud max-h-[calc(100dvh-6.5rem)] w-[min(100vw-1.5rem,24rem)] overflow-auto">
+        <div className="hud max-h-[calc(100dvh-12rem)] w-full overflow-auto">
           <div className="flex items-center justify-between px-3 pt-2">
             <p className="hud-label">Directions</p>
             <span className="flex items-center gap-1">

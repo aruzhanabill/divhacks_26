@@ -35,11 +35,6 @@ export function MapCanvas({ apiKey, children }: MapCanvasProps) {
         >
           {children}
         </Map>
-        <img
-          src="/safe-path-banner.png"
-          alt="Safe Path"
-          className="pointer-events-none absolute top-3 left-1/2 z-10 h-16 w-auto max-w-[min(92vw,28rem)] -translate-x-1/2"
-        />
       </div>
     </APIProvider>
   );
