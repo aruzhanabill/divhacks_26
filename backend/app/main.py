@@ -50,6 +50,14 @@ def _rows(start: datetime, end: datetime) -> list[dict]:
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
+def _latest_stored() -> datetime | None:
+    with pool.connection() as conn:
+        row = conn.execute("SELECT max(timestamp) FROM incidents").fetchone()
+    if row is None or row[0] is None:
+        return None
+    return row[0]
+
+
 def _read_sim() -> dict | None:
     with pool.connection() as conn:
         cur = conn.execute(
@@ -91,16 +99,20 @@ def health() -> dict:
 
 @app.get("/dataset")
 def dataset() -> dict:
-    try:
-        latest = fetch_latest_add_ts()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail="NYPD Calls for Service request failed") from exc
+    latest = _latest_stored()
+    source = "Tiger Cloud"
+    if latest is None:
+        try:
+            latest = fetch_latest_add_ts()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="NYPD Calls for Service request failed") from exc
+        source = "NYPD Calls for Service (Year to Date)"
     suggested = None
     if latest is not None:
         floored = (as_nyc(latest) - timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
         suggested = floored.strftime("%Y-%m-%dT%H:%M")
     return {
-        "source": "NYPD Calls for Service (Year to Date)",
+        "source": source,
         "latest_add_ts": latest,
         "suggested_start": suggested,
         "timezone": "America/New_York",
