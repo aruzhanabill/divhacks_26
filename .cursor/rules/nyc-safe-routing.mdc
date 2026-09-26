@@ -1,0 +1,31 @@
+---
+description: NYC safe-routing product context, simulated crime data, and shared incident schema
+alwaysApply: true
+---
+
+# NYC safe-routing app
+
+Help people move around NYC with crime-informed routes. Stack: Next.js (TypeScript) frontend, FastAPI backend, Postgres + PostGIS.
+
+## Simulation, not live feeds
+
+Use historical NYC Open Data (or a static dump) replayed on a clock (`sim_now` / replay offset) as if it were live. Do not add live NYPD or 911 polling unless the user asks.
+
+```python
+# ❌ BAD — wall-clock "now" against years-old timestamps
+Incident.timestamp >= datetime.utcnow() - timedelta(hours=24)
+
+# ✅ GOOD — window around the simulation clock
+Incident.timestamp >= sim_now - timedelta(hours=24)
+Incident.timestamp <= sim_now
+```
+
+## Architecture
+
+- Google Maps UI requests **multiple** Directions alternatives, then scores them via the backend corridor query.
+- Heatmap is a **toggleable overlay**. It is not the source of truth for which route is safest.
+- Route safety comes only from `POST /routes/score` (PostGIS buffer around each polyline).
+
+## Shared incident schema
+
+Normalize every source row to: `lat`, `lng`, `category`, `severity`, `timestamp`, plus `source_id` for ingest upserts. Store a PostGIS point from `lat`/`lng`; do not invent extra crime fields unless needed for scoring weights.

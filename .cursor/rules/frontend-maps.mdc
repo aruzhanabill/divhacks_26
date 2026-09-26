@@ -1,0 +1,32 @@
+---
+description: Next.js Google Maps, Directions alternatives, and toggleable crime heatmap
+globs: "{frontend,app,src}/**/*.{ts,tsx}"
+alwaysApply: false
+---
+
+# Frontend maps (Next.js)
+
+Load Maps JavaScript API, the `visualization` library (`HeatmapLayer`), and Directions through the official loader. Map UI is a client component (`"use client"`). Keep Google types behind a thin wrapper.
+
+## Keys and secrets
+
+Never commit API keys. Use a map-restricted `NEXT_PUBLIC_` key for the browser Maps SDK, or proxy Directions from the server. Do not put unrestricted Google secrets in client code.
+
+## Heatmap vs scoring
+
+Heatmap on/off is a UI toggle. Points come from a backend incidents or heatmap endpoint. Do not derive a “safest route” by sampling heatmap pixels.
+
+```tsx
+// ❌ BAD
+const safest = routes.sort((a, b) => heatmapHits(a) - heatmapHits(b))[0];
+
+// ✅ GOOD
+const scored = await fetch("/routes/score", {
+  method: "POST",
+  body: JSON.stringify({ routes: alternatives, corridor_meters: 150 }),
+});
+```
+
+## Routing
+
+Request **multiple** Directions alternatives. Send each polyline (or path) to `POST /routes/score`. Render routes ranked by the API `safety_score`. Do not reimplement corridor counting on the client.

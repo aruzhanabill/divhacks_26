@@ -1,0 +1,31 @@
+---
+description: POST /routes/score corridor buffering and safety scores via PostGIS
+globs: backend/**/*.py
+alwaysApply: false
+---
+
+# Route scoring API
+
+`POST /routes/score` accepts candidate Google Directions routes (encoded polyline or lat/lng path), a corridor width (default 100–200 meters), and an optional time window around `sim_now`.
+
+Lower weighted incident total means **safer**. Keep that direction consistent in API and UI. Do not put scoring logic in the frontend.
+
+```python
+# ❌ BAD — score on the client or with naive bounding boxes
+score = len(points_in_bbox(route.bounds))
+
+# ✅ GOOD — buffer the polyline in meters, weight incidents in the corridor
+# decode polyline → LineString → ST_Buffer(geom, corridor_meters)
+# weight by severity, recency vs sim_now, and category
+```
+
+## Pipeline
+
+1. Decode each route to a LineString (SRID 4326 / geography).
+2. `ST_Buffer` the line by corridor width in **meters**.
+3. Count/weight incidents whose point is inside the buffer and in the sim time window.
+4. Return one result per route:
+
+`{ "route_id", "safety_score", "incident_count", "breakdown" }`
+
+`breakdown` may include category or severity buckets. `safety_score` must be documented: higher score = safer (invert the raw weight) **or** higher score = more risk—pick one and use it everywhere. Prefer **higher `safety_score` = safer** (invert weighted incident risk).
