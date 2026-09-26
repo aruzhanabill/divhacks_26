@@ -11,7 +11,14 @@ export const NYC_BOUNDS = {
 
 export const GOOGLE_MAP_ID = "DEMO_MAP_ID";
 
-export const MAP_LIBRARIES: ("places" | "routes")[] = ["places", "routes"];
+export const MAP_LIBRARIES: ("places" | "routes" | "visualization")[] = [
+  "places",
+  "routes",
+  "visualization",
+];
+
+// HeatmapLayer was removed from the Maps JavaScript API in 3.65.
+export const MAPS_JS_VERSION = "3.64";
 
 export const WALKING_TRAVEL_MODE = "WALKING" as const;
 

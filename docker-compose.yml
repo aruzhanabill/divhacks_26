@@ -1,0 +1,14 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: safepath
+      POSTGRES_PASSWORD: safepath
+      POSTGRES_DB: safepath
+    ports:
+      - "5432:5432"
+    volumes:
+      - safepath_pg:/var/lib/postgresql/data
+
+volumes:
+  safepath_pg:
