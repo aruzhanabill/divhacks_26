@@ -104,6 +104,18 @@ export function Playback() {
     progressRef.current = seek.progress;
   }
 
+  const showStored = useCallback((payload: { incidents: Incident[]; start: string; end: string }) => {
+    setIncidents(payload.incidents);
+    setReplayStart(payload.start);
+    setReplayEnd(payload.end);
+    setBatchId(`${payload.start}:${payload.incidents.length}:${Date.now()}`);
+    setProgress(0);
+    setVisibleCount(0);
+    setSimMs(Date.parse(payload.start));
+    setSeek({ id: Date.now(), progress: 0 });
+    setStatus(payload.incidents.length > 0 ? "ready" : "idle");
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     fetch("/api/dataset")
@@ -111,10 +123,24 @@ export function Playback() {
         if (!response.ok) throw new Error(await readError(response));
         return response.json();
       })
-      .then((data: { latest_add_ts?: string; suggested_start?: string }) => {
+      .then(async (data: { latest_add_ts?: string; suggested_start?: string; source?: string }) => {
         if (cancelled) return;
-        if (data.latest_add_ts) setLatestLabel(formatNyc(Date.parse(data.latest_add_ts)));
+        if (data.latest_add_ts) {
+          const stored = data.source === "Tiger Cloud" ? "stored in Tiger Cloud" : "in the dataset";
+          setLatestLabel(`${stored}: ${formatNyc(Date.parse(data.latest_add_ts))}`);
+        }
         if (data.suggested_start && !startEdited.current) setStartLocal(data.suggested_start);
+        if (data.source !== "Tiger Cloud" || !data.suggested_start) return;
+        const endLocal = addMinutes(data.suggested_start, windowMinutes);
+        const params = new URLSearchParams({ start: data.suggested_start, end: endLocal });
+        const incidentsResponse = await fetch(`/api/incidents?${params.toString()}`);
+        if (!incidentsResponse.ok || cancelled) return;
+        const payload = (await incidentsResponse.json()) as {
+          incidents: Incident[];
+          start: string;
+          end: string;
+        };
+        if (!cancelled) showStored(payload);
       })
       .catch(() => {
         if (!cancelled) setLatestLabel(null);
@@ -122,7 +148,9 @@ export function Playback() {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // Load the stored Tiger window once. Later window changes wait for Load calls.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showStored]);
 
   useEffect(() => {
     if (!map) return;
@@ -328,15 +356,7 @@ export function Playback() {
         start: string;
         end: string;
       };
-      setIncidents(payload.incidents);
-      setReplayStart(payload.start);
-      setReplayEnd(payload.end);
-      setBatchId(`${payload.start}:${payload.incidents.length}:${Date.now()}`);
-      setProgress(0);
-      setVisibleCount(0);
-      setSimMs(Date.parse(payload.start));
-      setSeek({ id: Date.now(), progress: 0 });
-      setStatus("ready");
+      showStored(payload);
       if (ingested.upserted === 0) {
         setError("No geocoded calls in that window. The public file currently ends in June 2026.");
       }
@@ -344,7 +364,7 @@ export function Playback() {
       setStatus(incidents.length > 0 ? "ready" : "idle");
       setError(err instanceof Error ? err.message : "Could not load calls");
     }
-  }, [incidents.length, startLocal, windowMinutes]);
+  }, [incidents.length, showStored, startLocal, windowMinutes]);
 
   function toggleCategory(category: Category) {
     setCategories((current) =>
@@ -404,7 +424,7 @@ export function Playback() {
           />
         </label>
         <p className="mt-1 text-xs text-[var(--muted)]">
-          {latestLabel ? `Latest call in the dataset: ${latestLabel}` : "Times are New York local."}
+          {latestLabel ? `Latest call ${latestLabel}` : "Times are New York local."}
         </p>
 
         <p className="hud-label mt-3">History in this replay</p>

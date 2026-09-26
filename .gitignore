@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 .env
 .env.local
+*-credentials.env
 .DS_Store
 *.tsbuildinfo
 photon-map/
