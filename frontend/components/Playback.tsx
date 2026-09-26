@@ -469,13 +469,8 @@ export function Playback() {
   }
 
   return (
-    <div
-      className="hud m-3 w-[min(100vw-1.5rem,22rem)]"
-      ref={(node) => {
-        if (node?.parentElement) node.parentElement.style.zIndex = "1";
-      }}
-    >
-      <div className="flex items-center justify-between gap-2 px-3 py-2">
+    <div className="hud flex max-h-[calc(100dvh-11rem)] w-[min(100vw-6.5rem,22rem)] flex-col">
+      <div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
         <button
           type="button"
           aria-expanded={open}
@@ -499,7 +494,7 @@ export function Playback() {
         </button>
       </div>
       {open ? (
-        <div className="max-h-[min(70dvh,36rem)] overflow-auto px-3 pb-3">
+        <div className="min-h-0 flex-1 overflow-auto px-3 pb-3">
 
         <label className="hud-label mt-3 block">
           Starting time

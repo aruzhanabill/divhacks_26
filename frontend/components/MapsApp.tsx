@@ -36,18 +36,26 @@ export function MapsApp({ apiKey }: MapsAppProps) {
       <FollowProvider>
         <MapCanvas apiKey={apiKey}>
           <MapControl position={ControlPosition.TOP_LEFT}>
-            <RoutePanel
-              origin={origin}
-              destination={destination}
-              onOriginSelect={setOrigin}
-              onDestinationSelect={setDestination}
-            />
-          </MapControl>
-          <MapControl position={ControlPosition.LEFT_BOTTOM}>
-            <Playback />
+            <div
+              className="m-3 flex w-[min(100vw-1.5rem,24rem)] flex-col items-start gap-2"
+              ref={(node) => {
+                if (node?.parentElement) node.parentElement.style.zIndex = "3";
+              }}
+            >
+              <img src="/safe-path-logo.png" alt="Safe Path" className="h-auto w-full" />
+              <RoutePanel
+                origin={origin}
+                destination={destination}
+                onOriginSelect={setOrigin}
+                onDestinationSelect={setDestination}
+              />
+            </div>
           </MapControl>
           <MapControl position={ControlPosition.RIGHT_BOTTOM}>
-            <ZoomControls />
+            <div className="mb-8 mr-3 flex items-end gap-2">
+              <Playback />
+              <ZoomControls />
+            </div>
           </MapControl>
         </MapCanvas>
       </FollowProvider>
@@ -71,7 +79,7 @@ function ZoomControls() {
   }
 
   return (
-    <div className="mb-10 mr-4 flex flex-col gap-1">
+    <div className="flex shrink-0 flex-col gap-1">
       <button
         type="button"
         aria-label="Zoom in"
