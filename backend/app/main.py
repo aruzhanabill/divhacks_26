@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.db import close_db, init_db, pool
 from app.ingest import NYC, as_nyc, fetch_latest_add_ts, ingest_window
+from app.scoring import ScoreRequest, score_routes
 
 MAX_WINDOW = timedelta(hours=6)
 SELECT_INCIDENTS = """
@@ -69,7 +70,12 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="NYC Safe Routing", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -111,6 +117,12 @@ def ingest(body: IngestBody) -> dict:
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail="NYPD Calls for Service request failed") from exc
     return result
+
+
+@app.post("/routes/score")
+def routes_score(body: ScoreRequest) -> dict:
+    """Higher safety_score is safer. Risk is crimes inside the corridor, not heatmap pixels."""
+    return score_routes(body)
 
 
 @app.get("/incidents")
