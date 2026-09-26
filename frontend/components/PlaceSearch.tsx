@@ -10,6 +10,7 @@ type PlaceAutocompleteInputProps = {
   onPlaceSelect: (place: SelectedPlace | null) => void;
   onError?: (message: string) => void;
   className?: string;
+  value?: string;
 };
 
 export function PlaceAutocompleteInput({
@@ -18,9 +19,15 @@ export function PlaceAutocompleteInput({
   onPlaceSelect,
   onError,
   className = "w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-zinc-400",
+  value,
 }: PlaceAutocompleteInputProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const places = useMapsLibrary("places");
+
+  useEffect(() => {
+    if (!inputRef.current || value == null || document.activeElement === inputRef.current) return;
+    inputRef.current.value = value;
+  }, [value]);
 
   useEffect(() => {
     if (!places || !inputRef.current) return;

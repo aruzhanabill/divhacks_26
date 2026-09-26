@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.db import close_db, init_db, pool
 from app.ingest import NYC, as_nyc, fetch_latest_add_ts, ingest_window
+from app.lights import ingest_street_lights
 from app.scoring import ScoreRequest, score_routes
 
 MAX_WINDOW = timedelta(hours=6)
@@ -111,6 +112,7 @@ def ingest(body: IngestBody) -> dict:
     start, end = _check_window(body.start, body.end)
     try:
         result = ingest_window(start, end)
+        result["street_lights"] = ingest_street_lights(end)
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text[:300] or "NYPD Calls for Service request failed"
         raise HTTPException(status_code=502, detail=detail) from exc

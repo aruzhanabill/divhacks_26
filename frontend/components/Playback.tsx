@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMap } from "@vis.gl/react-google-maps";
 import { useFollowLive, usePublishFollow, type RevealedCall } from "@/lib/follow";
+import { CrimeGlyph, crimePinElement } from "@/lib/crimePin";
+import { useTheme } from "@/lib/theme";
 import {
   CATEGORIES,
-  CATEGORY_COLOR,
   CATEGORY_LABEL,
   DEFAULT_CATEGORIES,
   addMinutes,
@@ -41,6 +42,7 @@ async function readError(response: Response): Promise<string> {
 }
 
 export function Playback() {
+  const { theme, toggleTheme } = useTheme();
   const map = useMap();
   const [startLocal, setStartLocal] = useState("2026-06-30T22:00");
   const [windowMinutes, setWindowMinutes] = useState(60);
@@ -70,7 +72,7 @@ export function Playback() {
   publishFollowRef.current = publishFollow;
   liveRef.current = live;
 
-  const markersRef = useRef<Map<string, google.maps.Marker>>(new Map());
+  const markersRef = useRef<Map<string, google.maps.marker.AdvancedMarkerElement>>(new Map());
   const infoRef = useRef<google.maps.InfoWindow | null>(null);
   const heatRef = useRef<HeatLayer | null>(null);
   const progressRef = useRef(0);
@@ -151,11 +153,16 @@ export function Playback() {
     let last = performance.now();
     let lastEmit = 0;
     let heatSignature = "";
+    let Pin: typeof google.maps.marker.AdvancedMarkerElement | null = null;
+    void google.maps.importLibrary("marker").then((lib) => {
+      if (cancelled) return;
+      Pin = (lib as google.maps.MarkerLibrary).AdvancedMarkerElement;
+    });
 
     const draw = (simMsValue: number) => {
       if (resetRef.current) {
         resetRef.current = false;
-        for (const marker of markers.values()) marker.setMap(null);
+        for (const marker of markers.values()) marker.map = null;
         markers.clear();
         heatSignature = "";
         const batch = incidentsRef.current;
@@ -173,26 +180,18 @@ export function Playback() {
       const visibleIds = new Set(visible.map((incident) => incident.source_id));
       for (const [id, marker] of markers) {
         if (!visibleIds.has(id)) {
-          marker.setMap(null);
+          marker.map = null;
           markers.delete(id);
         }
       }
 
       for (const incident of visible) {
-        if (markers.has(incident.source_id)) continue;
-        const marker = new google.maps.Marker({
+        if (markers.has(incident.source_id) || !Pin) continue;
+        const marker = new Pin({
           map,
           position: { lat: incident.lat, lng: incident.lng },
-          icon: {
-            path: google.maps.SymbolPath.CIRCLE,
-            scale: 5 + Math.min(incident.severity, 5) * 0.6,
-            fillColor: CATEGORY_COLOR[incident.category],
-            fillOpacity: 0.94,
-            strokeColor: "#ffffff",
-            strokeWeight: 1,
-          },
+          content: crimePinElement(incident.category),
           title: CATEGORY_LABEL[incident.category],
-          optimized: false,
         });
         marker.addListener("click", () => {
           const when = new Intl.DateTimeFormat("en-US", {
@@ -293,7 +292,7 @@ export function Playback() {
     return () => {
       cancelled = true;
       cancelAnimationFrame(frame);
-      for (const marker of markers.values()) marker.setMap(null);
+      for (const marker of markers.values()) marker.map = null;
       markers.clear();
       heatRef.current?.setMap(null);
       heatRef.current = null;
@@ -360,27 +359,39 @@ export function Playback() {
   }
 
   return (
-    <div className="m-3 w-[min(100vw-1.5rem,22rem)] rounded-xl bg-white/95 shadow-lg ring-1 ring-zinc-200 backdrop-blur">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left"
-      >
-        <span>
-          <span className="block text-xs font-medium uppercase tracking-wide text-zinc-500">
-            Calls for Service
+    <div
+      className="hud m-3 w-[min(100vw-1.5rem,22rem)]"
+      ref={(node) => {
+        if (node?.parentElement) node.parentElement.style.zIndex = "1";
+      }}
+    >
+      <div className="flex items-center justify-between gap-2 px-3 py-2">
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+          className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
+        >
+          <span>
+            <span className="hud-label block">Calls for Service</span>
+            <span className="mt-1 block text-sm font-medium">{clockText}</span>
           </span>
-          <span className="block text-sm font-medium text-zinc-900">{clockText}</span>
-        </span>
-        <svg viewBox="0 0 20 20" className={`h-4 w-4 text-zinc-500 ${open ? "rotate-180" : ""}`} aria-hidden="true">
-          <path fill="currentColor" d="M5.2 7.6 10 12.4l4.8-4.8 1.2 1.2L10 14.8 4 8.8z" />
-        </svg>
-      </button>
+          <svg viewBox="0 0 20 20" className={`h-4 w-4 shrink-0 ${open ? "rotate-180" : ""}`} aria-hidden="true">
+            <path fill="currentColor" d="M5.2 7.6 10 12.4l4.8-4.8 1.2 1.2L10 14.8 4 8.8z" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          onClick={toggleTheme}
+          className="chip shrink-0 px-2 py-1 text-[10px] font-semibold uppercase"
+        >
+          {theme === "dark" ? "Light" : "Dark"}
+        </button>
+      </div>
       {open ? (
         <div className="max-h-[min(70dvh,36rem)] overflow-auto px-3 pb-3">
 
-        <label className="mt-3 block text-xs font-medium text-zinc-500">
+        <label className="hud-label mt-3 block">
           Starting time
           <input
             type="datetime-local"
@@ -389,14 +400,14 @@ export function Playback() {
               startEdited.current = true;
               setStartLocal(event.target.value);
             }}
-            className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900"
+            className="hud-field"
           />
         </label>
-        <p className="mt-1 text-xs text-zinc-500">
+        <p className="mt-1 text-xs text-[var(--muted)]">
           {latestLabel ? `Latest call in the dataset: ${latestLabel}` : "Times are New York local."}
         </p>
 
-        <p className="mt-3 text-xs font-medium text-zinc-500">History in this replay</p>
+        <p className="hud-label mt-3">History in this replay</p>
         <div className="mt-1 flex flex-wrap gap-1">
           {WINDOWS.map((option) => (
             <button
@@ -404,18 +415,14 @@ export function Playback() {
               type="button"
               aria-pressed={windowMinutes === option.minutes}
               onClick={() => setWindowMinutes(option.minutes)}
-              className={`rounded-full border px-2.5 py-1 text-xs ${
-                windowMinutes === option.minutes
-                  ? "border-zinc-900 bg-zinc-900 text-white"
-                  : "border-zinc-200 bg-white text-zinc-800"
-              }`}
+              className="chip px-2.5 py-1 text-xs"
             >
               {option.label}
             </button>
           ))}
         </div>
 
-        <p className="mt-3 text-xs font-medium text-zinc-500">Playback length</p>
+        <p className="hud-label mt-3">Playback length</p>
         <div className="mt-1 flex flex-wrap gap-1">
           {PITCHES.map((seconds) => (
             <button
@@ -423,18 +430,14 @@ export function Playback() {
               type="button"
               aria-pressed={pitchSeconds === seconds}
               onClick={() => setPitchSeconds(seconds)}
-              className={`rounded-full border px-2.5 py-1 text-xs ${
-                pitchSeconds === seconds
-                  ? "border-zinc-900 bg-zinc-900 text-white"
-                  : "border-zinc-200 bg-white text-zinc-800"
-              }`}
+              className="chip px-2.5 py-1 text-xs"
             >
               {seconds < 120 ? `${seconds}s` : "2 min"}
             </button>
           ))}
         </div>
 
-        <p className="mt-3 text-xs font-medium text-zinc-500">Show on the map</p>
+        <p className="hud-label mt-3">Show on the map</p>
         <div className="mt-1 flex flex-wrap gap-1">
           {CATEGORIES.map((category) => (
             <button
@@ -442,19 +445,15 @@ export function Playback() {
               type="button"
               aria-pressed={categories.includes(category)}
               onClick={() => toggleCategory(category)}
-              className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs ${
-                categories.includes(category)
-                  ? "border-zinc-900 bg-zinc-900 text-white"
-                  : "border-zinc-200 bg-white text-zinc-700"
-              }`}
+              className="chip inline-flex items-center gap-1 px-2 py-1 text-xs"
             >
-              <i className="inline-block h-2 w-2 rounded-full" style={{ background: CATEGORY_COLOR[category] }} />
+              <CrimeGlyph category={category} />
               {CATEGORY_LABEL[category]}
             </button>
           ))}
         </div>
 
-        <label className="mt-3 flex items-center gap-2 text-xs font-medium text-zinc-700">
+        <label className="mt-3 flex items-center gap-2 text-xs font-medium">
           <input type="checkbox" checked={heatmapOn} onChange={(event) => setHeatmapOn(event.target.checked)} />
           Heatmap overlay
         </label>
@@ -464,7 +463,7 @@ export function Playback() {
             type="button"
             onClick={() => void loadCalls()}
             disabled={status === "loading"}
-            className="rounded-lg bg-orange-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            className="chip hud-go px-3 py-2 text-sm font-medium disabled:opacity-50"
           >
             {status === "loading" ? "Loading…" : "Load calls"}
           </button>
@@ -480,7 +479,7 @@ export function Playback() {
               }
               setPlaying((value) => !value);
             }}
-            className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-900 disabled:opacity-50"
+            className="chip px-3 py-2 text-sm font-medium disabled:opacity-50"
           >
             {playing ? "Pause" : progress >= 1 ? "Replay" : "Play"}
           </button>
@@ -488,15 +487,15 @@ export function Playback() {
             type="button"
             disabled={status !== "ready"}
             onClick={() => scrub(0)}
-            className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 disabled:opacity-50"
+            className="chip px-3 py-2 text-sm disabled:opacity-50"
           >
             Reset
           </button>
         </div>
 
         <div className="mt-3 flex items-baseline justify-between">
-          <strong className="text-2xl font-semibold tabular-nums text-zinc-900">{visibleCount}</strong>
-          <span className="text-xs text-zinc-500">
+          <strong className="text-2xl font-semibold tabular-nums">{visibleCount}</strong>
+          <span className="text-xs text-[var(--muted)]">
             {status === "ready" ? `of ${filteredTotal} shown · ${incidents.length} stored` : "nothing loaded"}
           </span>
         </div>
@@ -507,7 +506,7 @@ export function Playback() {
           value={Math.round(progress * 1000)}
           disabled={status !== "ready"}
           onChange={(event) => scrub(Number(event.target.value) / 1000)}
-          className="mt-1 w-full accent-orange-700"
+          className="mt-1 w-full accent-[var(--accent)]"
         />
         {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
         </div>

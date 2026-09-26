@@ -4,15 +4,37 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 import { PlaceAutocompleteInput } from "@/components/PlaceSearch";
 import { useFollow, useFollowLive } from "@/lib/follow";
+import { useTheme } from "@/lib/theme";
 import { metersToPath, pathFrom, pointAlong, type LatLng } from "@/lib/geo";
 import type { SelectedPlace } from "@/lib/googleMaps";
 
 const CORRIDOR_METERS = 150;
 
+function preferenceScore(route: RouteSummary, preferSafe: boolean, preferLit: boolean): number {
+  const parts: number[] = [];
+  if (preferSafe) parts.push(route.safetyScore ?? 0);
+  if (preferLit) parts.push(route.lightScore ?? 0);
+  if (parts.length === 0) return 0;
+  return parts.reduce((sum, value) => sum + value, 0) / parts.length;
+}
+
+function pickIndex(summaries: RouteSummary[], preferSafe: boolean, preferLit: boolean): number {
+  return [...summaries].sort(
+    (a, b) => preferenceScore(b, preferSafe, preferLit) - preferenceScore(a, preferSafe, preferLit) || a.index - b.index,
+  )[0]?.index ?? 0;
+}
+
+function placeLabel(place: SelectedPlace | null): string {
+  if (!place) return "";
+  return place.address || place.name;
+}
+
 type RouteScore = {
   route_id: string;
   safety_score: number;
   incident_count: number;
+  light_score: number;
+  light_count: number;
 };
 
 type RouteSummary = {
@@ -22,6 +44,8 @@ type RouteSummary = {
   summary: string;
   safetyScore: number | null;
   incidentCount: number | null;
+  lightScore: number | null;
+  lightCount: number | null;
 };
 
 type RoutePanelProps = {
@@ -41,7 +65,11 @@ export function RoutePanel({
   const routesLib = useMapsLibrary("routes");
   const follow = useFollow();
   const live = useFollowLive();
+  const { theme, toggleTheme } = useTheme();
   const [open, setOpen] = useState(false);
+  const [preferSafe, setPreferSafe] = useState(true);
+  const [preferLit, setPreferLit] = useState(true);
+  const [locating, setLocating] = useState(false);
   const [rerouteTick, setRerouteTick] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -59,9 +87,13 @@ export function RoutePanel({
   const callsRef = useRef(follow.calls);
   const destinationRef = useRef(destination);
   const liveRef = useRef(live);
+  const preferSafeRef = useRef(preferSafe);
+  const preferLitRef = useRef(preferLit);
   callsRef.current = follow.calls;
   destinationRef.current = destination;
   liveRef.current = live;
+  preferSafeRef.current = preferSafe;
+  preferLitRef.current = preferLit;
 
   const clearAltLines = useCallback(() => {
     altLinesRef.current.forEach((line) => line.setMap(null));
@@ -112,17 +144,25 @@ export function RoutePanel({
     const renderer = rendererRef.current;
     const result = resultRef.current;
     if (!renderer || !result) return;
-    const safest = safestIndex != null && selectedIndex === safestIndex;
+    const preferred = preferSafe || preferLit;
+    const matches = preferred && safestIndex != null && selectedIndex === safestIndex;
     renderer.setOptions({
       polylineOptions: {
-        strokeColor: safest ? "#15803d" : "#c2410c",
+        strokeColor: !preferred ? "#1a73e8" : matches ? "#15803d" : "#c2410c",
         strokeWeight: 6,
         zIndex: 2,
       },
     });
     renderer.setRouteIndex(selectedIndex);
+    const route = result.routes[selectedIndex];
+    if (route) {
+      activePathRef.current = route.overview_path.map((point) => ({
+        lat: point.lat(),
+        lng: point.lng(),
+      }));
+    }
     drawAlternatives(result, selectedIndex);
-  }, [drawAlternatives, safestIndex, selectedIndex]);
+  }, [drawAlternatives, preferLit, preferSafe, safestIndex, selectedIndex]);
 
   const requestRoute = useCallback(
     async (from?: LatLng) => {
@@ -184,12 +224,11 @@ export function RoutePanel({
             summary: route.summary || `Walking route ${index + 1}`,
             safetyScore: score?.safety_score ?? null,
             incidentCount: score?.incident_count ?? null,
+            lightScore: score?.light_score ?? null,
+            lightCount: score?.light_count ?? null,
           };
         });
-        const safest = [...nextSummaries].sort(
-          (a, b) => (b.safetyScore ?? -1) - (a.safetyScore ?? -1) || a.index - b.index,
-        )[0];
-        const chosen = safest?.index ?? 0;
+        const chosen = pickIndex(nextSummaries, preferSafeRef.current, preferLitRef.current);
         const chosenPath = result.routes[chosen]?.overview_path.map((point) => ({
           lat: point.lat(),
           lng: point.lng(),
@@ -202,7 +241,7 @@ export function RoutePanel({
         }
         rendererRef.current?.setDirections(result);
         setSummaries(nextSummaries);
-        setSafestIndex(chosen);
+        setSafestIndex(preferSafeRef.current || preferLitRef.current ? chosen : null);
         setSelectedIndex(chosen);
         if (from) setRerouted(true);
       } catch (err) {
@@ -227,6 +266,13 @@ export function RoutePanel({
     },
     [clearAltLines, destination, map, origin, routesLib],
   );
+
+  useEffect(() => {
+    if (summaries.length === 0) return;
+    const chosen = pickIndex(summaries, preferSafe, preferLit);
+    setSafestIndex(preferSafe || preferLit ? chosen : null);
+    setSelectedIndex(chosen);
+  }, [preferLit, preferSafe, summaries]);
 
   useEffect(() => {
     if (!map) return;
@@ -268,7 +314,7 @@ export function RoutePanel({
 
   useEffect(() => {
     const clock = liveRef.current;
-    if (!clock.playing || !destination || activePathRef.current.length < 2 || rerouteLock.current) {
+    if (!preferSafe || !clock.playing || !destination || activePathRef.current.length < 2 || rerouteLock.current) {
       return;
     }
     const span = Math.max(0.001, 1 - routeAnchorProgress.current);
@@ -285,78 +331,174 @@ export function RoutePanel({
       rerouteLock.current = false;
       setRerouteTick((value) => value + 1);
     });
-  }, [destination, follow.calls, requestRoute, rerouteTick]);
+  }, [destination, follow.calls, preferSafe, requestRoute, rerouteTick]);
+
+  function locateMe() {
+    if (!navigator.geolocation) {
+      setError("This browser cannot read your location.");
+      return;
+    }
+    setLocating(true);
+    setError("");
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        onOriginSelect({
+          name: "Your location",
+          address: "Your location",
+          location: { lat: position.coords.latitude, lng: position.coords.longitude },
+        });
+        setLocating(false);
+      },
+      () => {
+        setError("Allow location access to use your current location.");
+        setLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 },
+    );
+  }
+
+  const preferenceCount = Number(preferSafe) + Number(preferLit);
 
   return (
-    <div className="m-3">
+    <div
+      className="m-3 mt-20"
+      ref={(node) => {
+        if (node?.parentElement) node.parentElement.style.zIndex = "3";
+      }}
+    >
       {open ? (
-        <div className="w-[min(100vw-1.5rem,22rem)] rounded-xl bg-white/95 p-3 shadow-lg ring-1 ring-zinc-200 backdrop-blur">
-          <div className="mb-2 flex items-center justify-between">
-            <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">Directions</p>
-            <button
-              type="button"
-              aria-label="Close directions"
-              onClick={() => setOpen(false)}
-              className="grid h-7 w-7 place-items-center rounded-full text-zinc-500 hover:bg-zinc-100"
-            >
-              <span aria-hidden="true">×</span>
-            </button>
+        <div className="hud max-h-[calc(100dvh-6.5rem)] w-[min(100vw-1.5rem,24rem)] overflow-auto">
+          <div className="flex items-center justify-between px-3 pt-2">
+            <p className="hud-label">Directions</p>
+            <span className="flex items-center gap-1">
+              <button type="button" onClick={toggleTheme} className="chip px-2 py-1 text-[10px] font-semibold uppercase">
+                {theme === "dark" ? "Light" : "Dark"}
+              </button>
+              <button
+                type="button"
+                aria-label="Close search"
+                onClick={() => setOpen(false)}
+                className="grid h-7 w-7 place-items-center"
+              >
+                <span aria-hidden="true">×</span>
+              </button>
+            </span>
           </div>
-          <div className="flex items-start gap-2">
-            <div className="flex min-w-0 flex-1 flex-col gap-2">
+          <div className="flex items-center justify-between gap-2 px-3 pb-2">
+            <div className="flex gap-1">
+              <button
+                type="button"
+                aria-pressed={preferSafe}
+                onClick={() => setPreferSafe((value) => !value)}
+                className="chip inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium"
+              >
+                <ShieldIcon hot={preferSafe} />
+                Safe
+              </button>
+              <button
+                type="button"
+                aria-pressed={preferLit}
+                onClick={() => setPreferLit((value) => !value)}
+                className="chip inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium"
+              >
+                <LampIcon />
+                Well-lit
+              </button>
+            </div>
+            <span className="text-xs font-medium text-[var(--muted)]">{preferenceCount} of 2</span>
+          </div>
+          <div className="flex flex-col gap-2 px-3 pb-3">
+            <label className="hud-label block" htmlFor="route-origin">
+              Starting point
               <PlaceAutocompleteInput
                 id="route-origin"
                 placeholder="Choose starting point"
+                value={placeLabel(origin)}
                 onPlaceSelect={onOriginSelect}
+                className="hud-field"
               />
-              <PlaceAutocompleteInput
-                id="route-destination"
-                placeholder="Choose destination"
-                onPlaceSelect={onDestinationSelect}
-              />
-            </div>
+            </label>
             <button
               type="button"
-              aria-label="Directions"
-              onClick={() => void requestRoute()}
-              disabled={loading}
-              className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#1a73e8] text-white disabled:opacity-50"
+              onClick={locateMe}
+              disabled={locating}
+              className="chip self-start px-2.5 py-1 text-xs font-medium disabled:opacity-50"
             >
-              <DirectionsIcon />
+              {locating ? "Finding you…" : "Your location"}
             </button>
+            <div className="flex items-end gap-2">
+              <label className="hud-label block min-w-0 flex-1" htmlFor="route-destination">
+                Destination
+                <PlaceAutocompleteInput
+                  id="route-destination"
+                  placeholder="Choose destination"
+                  value={placeLabel(destination)}
+                  onPlaceSelect={onDestinationSelect}
+                  className="hud-field"
+                />
+              </label>
+              <button
+                type="button"
+                aria-label="Directions"
+                onClick={() => void requestRoute()}
+                disabled={loading}
+                className="mb-0.5 grid h-10 w-10 shrink-0 place-items-center bg-[var(--accent)] text-white disabled:opacity-50"
+              >
+                <DirectionsIcon />
+              </button>
+            </div>
           </div>
-          {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
-          {rerouted ? <p className="mt-2 text-xs text-green-800">Route updated around a nearby call.</p> : null}
+          {error ? <p className="px-3 pb-2 text-xs text-red-400">{error}</p> : null}
+          {rerouted ? <p className="px-3 pb-2 text-xs text-[var(--good)]">Route updated around a nearby call.</p> : null}
           {summaries.length > 0 ? (
-            <ul className="mt-2 flex max-h-48 flex-col gap-1 overflow-auto">
+            <ul className="flex max-h-48 flex-col gap-1 overflow-auto px-3 pb-3">
               {[...summaries]
-                .sort((a, b) => (b.safetyScore ?? -1) - (a.safetyScore ?? -1) || a.index - b.index)
+                .sort(
+                  (a, b) =>
+                    preferenceScore(b, preferSafe, preferLit) - preferenceScore(a, preferSafe, preferLit) ||
+                    a.index - b.index,
+                )
                 .map((route) => {
                   const selected = route.index === selectedIndex;
-                  const safest = route.index === safestIndex;
+                  const best = route.index === safestIndex;
                   return (
                     <li key={route.index}>
                       <button
                         type="button"
                         onClick={() => setSelectedIndex(route.index)}
-                        className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm ${
+                        className={`flex w-full items-center gap-2 border px-3 py-2 text-left text-sm ${
                           selected
-                            ? safest
-                              ? "border-green-700 bg-green-50 text-green-950"
-                              : "border-orange-700 bg-orange-50 text-orange-950"
-                            : "border-zinc-200 bg-white text-zinc-800"
+                            ? best
+                              ? "border-[var(--edge)] bg-[var(--good-bg)]"
+                              : preferSafe || preferLit
+                                ? "border-[var(--line)] bg-[var(--warn-bg)]"
+                                : "border-[var(--accent)] bg-[var(--field)]"
+                            : "border-[var(--line)] bg-[var(--field)]"
                         }`}
                       >
-                        {safest ? <ShieldIcon /> : <span className="w-4" />}
                         <span className="min-w-0">
-                          <span className="block font-medium">
-                            {route.duration}
-                            {route.safetyScore != null ? ` · ${route.safetyScore}` : ""}
+                          <span className="flex flex-wrap items-center gap-2 font-medium">
+                            <span>{route.duration}</span>
+                            {preferSafe && route.safetyScore != null ? (
+                              <span className="inline-flex items-center gap-1 text-xs">
+                                <ShieldIcon hot={best} />
+                                {route.safetyScore}
+                              </span>
+                            ) : null}
+                            {preferLit && route.lightScore != null ? (
+                              <span className="inline-flex items-center gap-1 text-xs">
+                                <LampIcon hot={best} />
+                                {route.lightScore}
+                              </span>
+                            ) : null}
                           </span>
-                          <span className="block text-xs text-zinc-500">
+                          <span className="block text-xs text-[var(--muted)]">
                             {route.distance}
-                            {route.incidentCount != null
-                              ? ` · ${route.incidentCount} ${route.incidentCount === 1 ? "call" : "calls"} nearby`
+                            {preferSafe && route.incidentCount != null
+                              ? ` · ${route.incidentCount} ${route.incidentCount === 1 ? "call" : "calls"}`
+                              : ""}
+                            {preferLit && route.lightCount != null
+                              ? ` · ${route.lightCount} dark ${route.lightCount === 1 ? "spot" : "spots"}`
                               : ""}
                             {route.summary ? ` · ${route.summary}` : ""}
                           </span>
@@ -371,14 +513,25 @@ export function RoutePanel({
       ) : (
         <button
           type="button"
-          aria-label="Directions"
+          aria-label="Search an address"
           onClick={() => setOpen(true)}
-          className="grid h-11 w-11 place-items-center rounded-full bg-white text-[#1a73e8] shadow-lg ring-1 ring-zinc-200"
+          className="hud grid h-11 w-11 place-items-center"
         >
-          <DirectionsIcon />
+          <SearchIcon />
         </button>
       )}
     </div>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 5 1.5-1.5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14"
+      />
+    </svg>
   );
 }
 
@@ -393,13 +546,21 @@ function DirectionsIcon() {
   );
 }
 
-function ShieldIcon() {
+function ShieldIcon({ hot = false }: { hot?: boolean }) {
   return (
-    <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-green-700" aria-label="Safest route">
+    <svg viewBox="0 0 24 24" className={`h-4 w-4 shrink-0 ${hot ? "text-[var(--good)]" : "text-[var(--muted)]"}`} aria-label="Safe">
       <path
         fill="currentColor"
         d="M12 2 4 5v6.1c0 5 3.4 9.7 8 10.9 4.6-1.2 8-5.9 8-10.9V5zm-1.1 13.2-3.2-3.2 1.4-1.4 1.8 1.8 3.8-3.8 1.4 1.4z"
       />
+    </svg>
+  );
+}
+
+function LampIcon({ hot = false }: { hot?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" className={`h-4 w-4 shrink-0 ${hot ? "text-[#7ad7ff]" : ""}`} aria-label="Well-lit">
+      <path fill="currentColor" d="M9 1h6v3H9zm-2 3h10v8H7zm2 8h6v5H9zm-2 5h10v3H7z" />
     </svg>
   );
 }

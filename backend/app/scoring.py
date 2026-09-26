@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.db import pool
 from app.ingest import as_nyc
+from app.lights import LOOKBACK
 
 CRIME_CATEGORIES = ("violent", "property", "disorder", "alarm")
 DEFAULT_CORRIDOR_METERS = 150
@@ -36,6 +37,24 @@ WHERE timestamp >= %(start)s
       )
 GROUP BY category
 """
+
+LIGHT_SQL = """
+SELECT count(*)::int AS light_count,
+       coalesce(sum(
+           severity * exp(
+               -greatest(extract(epoch FROM (%(anchor)s - timestamp)), 0) / %(tau)s
+           )
+       ), 0)::float AS weight
+FROM street_lights
+WHERE timestamp >= %(start)s
+  AND timestamp <= %(end)s
+  AND ST_Covers(
+        ST_Buffer(ST_GeogFromText(%(wkt)s), %(corridor_meters)s),
+        geom
+      )
+"""
+
+LIGHT_TAU_SECONDS = 7 * 24 * 3600
 
 
 class LatLng(BaseModel):
@@ -155,12 +174,26 @@ def score_routes(body: ScoreRequest) -> dict:
             }
             incident_count = sum(item["count"] for item in breakdown.values())
             weight = sum(item["weight"] for item in breakdown.values())
+            light_row = conn.execute(
+                LIGHT_SQL,
+                {
+                    "anchor": anchor,
+                    "tau": LIGHT_TAU_SECONDS,
+                    "start": anchor - LOOKBACK,
+                    "end": anchor,
+                    "wkt": wkt,
+                    "corridor_meters": body.corridor_meters,
+                },
+            ).fetchone()
+            light_count, light_weight = light_row if light_row is not None else (0, 0.0)
             results.append(
                 {
                     "route_id": route.route_id,
                     "safety_score": _safety_score(weight),
                     "incident_count": incident_count,
                     "breakdown": breakdown,
+                    "light_score": _safety_score(light_weight),
+                    "light_count": light_count,
                 }
             )
     return {

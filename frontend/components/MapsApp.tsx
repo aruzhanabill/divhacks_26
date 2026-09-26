@@ -1,13 +1,12 @@
 "use client";
 
-import { useCallback, useState } from "react";
-import { ControlPosition, MapControl } from "@vis.gl/react-google-maps";
+import { useEffect, useState } from "react";
+import { ControlPosition, MapControl, useMap } from "@vis.gl/react-google-maps";
 import { MapCanvas } from "@/components/MapCanvas";
-import { PlaceMarker } from "@/components/PlaceMarker";
-import { PlaceSearch } from "@/components/PlaceSearch";
 import { Playback } from "@/components/Playback";
 import { RoutePanel } from "@/components/RoutePanel";
 import { FollowProvider } from "@/lib/follow";
+import { ThemeProvider } from "@/lib/theme";
 import type { SelectedPlace } from "@/lib/googleMaps";
 
 type MapsAppProps = {
@@ -15,20 +14,8 @@ type MapsAppProps = {
 };
 
 export function MapsApp({ apiKey }: MapsAppProps) {
-  const [place, setPlace] = useState<SelectedPlace | null>(null);
-  const [placeError, setPlaceError] = useState("");
   const [origin, setOrigin] = useState<SelectedPlace | null>(null);
   const [destination, setDestination] = useState<SelectedPlace | null>(null);
-
-  const onPlaceSelect = useCallback((next: SelectedPlace | null) => {
-    if (!next) {
-      setPlace(null);
-      setPlaceError("No location found for that place.");
-      return;
-    }
-    setPlaceError("");
-    setPlace(next);
-  }, []);
 
   if (!apiKey) {
     return (
@@ -45,24 +32,62 @@ export function MapsApp({ apiKey }: MapsAppProps) {
   }
 
   return (
-    <FollowProvider>
-      <MapCanvas apiKey={apiKey}>
-        <PlaceMarker place={place} />
-        <MapControl position={ControlPosition.TOP_LEFT}>
-          <div className="flex items-start">
-            <PlaceSearch onPlaceSelect={onPlaceSelect} error={placeError} />
+    <ThemeProvider>
+      <FollowProvider>
+        <MapCanvas apiKey={apiKey}>
+          <MapControl position={ControlPosition.TOP_LEFT}>
             <RoutePanel
               origin={origin}
               destination={destination}
               onOriginSelect={setOrigin}
               onDestinationSelect={setDestination}
             />
-          </div>
-        </MapControl>
-        <MapControl position={ControlPosition.LEFT_BOTTOM}>
-          <Playback />
-        </MapControl>
-      </MapCanvas>
-    </FollowProvider>
+          </MapControl>
+          <MapControl position={ControlPosition.LEFT_BOTTOM}>
+            <Playback />
+          </MapControl>
+          <MapControl position={ControlPosition.RIGHT_BOTTOM}>
+            <ZoomControls />
+          </MapControl>
+        </MapCanvas>
+      </FollowProvider>
+    </ThemeProvider>
+  );
+}
+
+function ZoomControls() {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!map) return;
+    const options = { cameraControl: false, zoomControl: false };
+    map.setOptions(options as google.maps.MapOptions);
+  }, [map]);
+
+  function zoomBy(delta: number) {
+    if (!map) return;
+    const current = map.getZoom() ?? 12;
+    map.setZoom(Math.min(21, Math.max(3, current + delta)));
+  }
+
+  return (
+    <div className="mb-10 mr-4 flex flex-col gap-1">
+      <button
+        type="button"
+        aria-label="Zoom in"
+        onClick={() => zoomBy(1)}
+        className="hud grid h-10 w-10 place-items-center text-lg font-semibold leading-none"
+      >
+        +
+      </button>
+      <button
+        type="button"
+        aria-label="Zoom out"
+        onClick={() => zoomBy(-1)}
+        className="hud grid h-10 w-10 place-items-center text-lg font-semibold leading-none"
+      >
+        −
+      </button>
+    </div>
   );
 }
