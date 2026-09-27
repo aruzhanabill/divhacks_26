@@ -558,8 +558,8 @@ export function Playback() {
           />
         </label>
         <p className="mt-1 text-xs text-[var(--muted)]">
-          {latestLabel ? `Latest call ${latestLabel}` : "Times are New York local."} Photos texted to the Photon
-          number land on this clock.
+          {latestLabel ? `Latest NYPD call ${latestLabel}` : "Times are New York local."} Photos you text Photon
+          stay on the map; the slider only walks through this replay hour.
         </p>
 
         <p className="hud-label mt-3">History in this replay</p>
