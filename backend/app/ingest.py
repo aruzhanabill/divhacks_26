@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from app.categorize import categorize
+from app.categorize import categorize, is_transit
 from app.db import pool
 
 NYC = ZoneInfo("America/New_York")
@@ -25,7 +25,7 @@ LAT_MIN, LAT_MAX = 40.30, 41.10
 LNG_MIN, LNG_MAX = -74.40, -73.50
 
 UPSERT = """
-INSERT INTO incidents (source_id, lat, lng, geom, category, severity, timestamp)
+INSERT INTO incidents (source_id, lat, lng, geom, category, severity, timestamp, is_transit)
 VALUES (
     %(source_id)s,
     %(lat)s,
@@ -33,7 +33,8 @@ VALUES (
     ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
     %(category)s,
     %(severity)s,
-    %(timestamp)s
+    %(timestamp)s,
+    %(is_transit)s
 )
 ON CONFLICT (source_id) DO UPDATE SET
     lat = EXCLUDED.lat,
@@ -41,7 +42,8 @@ ON CONFLICT (source_id) DO UPDATE SET
     geom = EXCLUDED.geom,
     category = EXCLUDED.category,
     severity = EXCLUDED.severity,
-    timestamp = EXCLUDED.timestamp
+    timestamp = EXCLUDED.timestamp,
+    is_transit = EXCLUDED.is_transit
 """
 
 
@@ -128,6 +130,7 @@ def _normalize(rows: list[dict]) -> list[dict]:
             "category": category,
             "severity": severity,
             "timestamp": timestamp,
+            "is_transit": is_transit(row.get("typ_desc")),
         }
     return list(by_source.values())
 

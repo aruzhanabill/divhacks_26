@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMap } from "@vis.gl/react-google-maps";
+import { StationLayer } from "@/components/StationLayer";
 import { useFollowLive, usePublishFollow, type RevealedCall } from "@/lib/follow";
-import { CrimeGlyph, crimePinElement } from "@/lib/crimePin";
+import { CrimeGlyph, TrainGlyph, crimePinElement } from "@/lib/crimePin";
 import { useTheme } from "@/lib/theme";
 import {
   CATEGORIES,
@@ -49,6 +50,9 @@ export function Playback() {
   const [pitchSeconds, setPitchSeconds] = useState(60);
   const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
   const [heatmapOn, setHeatmapOn] = useState(false);
+  const [transitOnly, setTransitOnly] = useState(false);
+  const [stationsOn, setStationsOn] = useState(false);
+  const [stationsLive, setStationsLive] = useState(false);
   const [latestLabel, setLatestLabel] = useState<string | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [batchId, setBatchId] = useState("");
@@ -83,6 +87,7 @@ export function Playback() {
   const startRef = useRef<number | null>(null);
   const endRef = useRef<number | null>(null);
   const heatmapOnRef = useRef(heatmapOn);
+  const transitOnlyRef = useRef(transitOnly);
   const resetRef = useRef(false);
   const seenSeek = useRef<number | null>(null);
   const seenBatch = useRef(batchId);
@@ -92,6 +97,7 @@ export function Playback() {
   incidentsRef.current = incidents;
   categoriesRef.current = categories;
   heatmapOnRef.current = heatmapOn;
+  transitOnlyRef.current = transitOnly;
   startRef.current = replayStart ? Date.parse(replayStart) : null;
   endRef.current = replayEnd ? Date.parse(replayEnd) : null;
   if (seenBatch.current !== batchId) {
@@ -202,8 +208,12 @@ export function Playback() {
       }
 
       const allowed = new Set(categoriesRef.current);
+      const transitFilter = transitOnlyRef.current;
       const visible = incidentsRef.current.filter(
-        (incident) => allowed.has(incident.category) && Date.parse(incident.timestamp) <= simMsValue,
+        (incident) =>
+          allowed.has(incident.category) &&
+          (!transitFilter || incident.is_transit === true) &&
+          Date.parse(incident.timestamp) <= simMsValue,
       );
       const visibleIds = new Set(visible.map((incident) => incident.source_id));
       for (const [id, marker] of markers) {
@@ -218,8 +228,8 @@ export function Playback() {
         const marker = new Pin({
           map,
           position: { lat: incident.lat, lng: incident.lng },
-          content: crimePinElement(incident.category),
-          title: CATEGORY_LABEL[incident.category],
+          content: crimePinElement(incident.category, incident.is_transit === true),
+          title: incident.is_transit ? `${CATEGORY_LABEL[incident.category]} · Transit` : CATEGORY_LABEL[incident.category],
         });
         marker.addListener("click", () => {
           const when = new Intl.DateTimeFormat("en-US", {
@@ -230,15 +240,16 @@ export function Playback() {
             minute: "2-digit",
             second: "2-digit",
           }).format(new Date(incident.timestamp));
+          const where = incident.is_transit ? "<span>In the subway system</span>" : "";
           infoRef.current?.setContent(
-            `<div class="callout"><strong>${CATEGORY_LABEL[incident.category]}</strong><span>${when}</span></div>`,
+            `<div class="callout"><strong>${CATEGORY_LABEL[incident.category]}</strong><span>${when}</span>${where}</div>`,
           );
           infoRef.current?.open({ map, anchor: marker });
         });
         markers.set(incident.source_id, marker);
       }
 
-      const signature = `${heatmapOnRef.current}:${categoriesRef.current.join(",")}:${visible.length}:${visible.at(-1)?.source_id ?? ""}`;
+      const signature = `${heatmapOnRef.current}:${transitFilter}:${categoriesRef.current.join(",")}:${visible.length}:${visible.at(-1)?.source_id ?? ""}`;
       const heat = heatRef.current;
       if (heat && signature !== heatSignature) {
         heatSignature = signature;
@@ -330,8 +341,12 @@ export function Playback() {
 
   const filteredTotal = useMemo(() => {
     const allowed = new Set(categories);
-    return incidents.filter((incident) => allowed.has(incident.category)).length;
-  }, [incidents, categories]);
+    return incidents.filter(
+      (incident) => allowed.has(incident.category) && (!transitOnly || incident.is_transit === true),
+    ).length;
+  }, [incidents, categories, transitOnly]);
+
+  const transitTotal = useMemo(() => incidents.filter((incident) => incident.is_transit === true).length, [incidents]);
 
   const clockText = simMs != null ? formatNyc(simMs) : "Load a window to start";
 
@@ -348,6 +363,13 @@ export function Playback() {
       });
       if (!ingestResponse.ok) throw new Error(await readError(ingestResponse));
       const ingested = (await ingestResponse.json()) as { upserted: number; start: string; end: string };
+      // Subway complaints and station reference for the same window. A data.ny.gov or
+      // complaint-feed hiccup must not block the calls replay, so failures are swallowed.
+      void fetch("/api/mta/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ start: startLocal, end: endLocal }),
+      }).catch(() => undefined);
       const params = new URLSearchParams({ start: ingested.start, end: ingested.end });
       const incidentsResponse = await fetch(`/api/incidents?${params.toString()}`);
       if (!incidentsResponse.ok) throw new Error(await readError(incidentsResponse));
@@ -380,6 +402,7 @@ export function Playback() {
 
   return (
     <div className="hud flex max-h-[calc(100dvh-11rem)] w-[min(100vw-6.5rem,22rem)] flex-col">
+      <StationLayer enabled={stationsOn} simMs={simMs} includeLive={stationsLive} />
       <div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
         <button
           type="button"
@@ -468,10 +491,33 @@ export function Playback() {
           ))}
         </div>
 
+        <div className="mt-1 flex flex-wrap gap-1">
+          <button
+            type="button"
+            aria-pressed={transitOnly}
+            onClick={() => setTransitOnly((value) => !value)}
+            className="chip inline-flex items-center gap-1 px-2 py-1 text-xs"
+            title="Only NYPD Transit Bureau calls"
+          >
+            <TrainGlyph hot={transitOnly} />
+            In subway only{transitTotal > 0 ? ` (${transitTotal})` : ""}
+          </button>
+        </div>
+
         <label className="mt-3 flex items-center gap-2 text-xs font-medium">
           <input type="checkbox" checked={heatmapOn} onChange={(event) => setHeatmapOn(event.target.checked)} />
           Heatmap overlay
         </label>
+        <label className="mt-1 flex items-center gap-2 text-xs font-medium">
+          <input type="checkbox" checked={stationsOn} onChange={(event) => setStationsOn(event.target.checked)} />
+          Subway station safety
+        </label>
+        {stationsOn ? (
+          <label className="ml-5 mt-1 flex items-center gap-2 text-xs text-[var(--muted)]">
+            <input type="checkbox" checked={stationsLive} onChange={(event) => setStationsLive(event.target.checked)} />
+            Include live MTA alerts and outages
+          </label>
+        ) : null}
 
         <div className="mt-3 flex gap-2">
           <button

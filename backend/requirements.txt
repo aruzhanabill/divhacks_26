@@ -3,3 +3,4 @@ uvicorn[standard]>=0.32
 httpx>=0.27
 psycopg[binary,pool]>=3.2
 pydantic>=2.9
+gtfs-realtime-bindings>=1.0
