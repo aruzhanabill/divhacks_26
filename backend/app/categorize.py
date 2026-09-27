@@ -70,6 +70,13 @@ _RULES: tuple[tuple[str, float, tuple[str, ...]], ...] = (
 
 _CRITICAL_CIP = frozenset({"CIP", "CRITICAL", "YES", "Y"})
 
+# Transit Bureau jobs end in "/TRANSIT" (e.g. "DISORDERLY: PERSON/TRANSIT") or name the bureau.
+_TRANSIT_NEEDLES = ("/TRANSIT", "TRANSIT BUREAU", "TRANSIT PATROL", "TRAIN RUN", "TRAIN ORDER")
+
+
+def is_transit(typ_desc: str | None) -> bool:
+    text = (typ_desc or "").upper()
+    return any(needle in text for needle in _TRANSIT_NEEDLES)
 # Closed set used by the map, minus `other`. Citizen photo reports use these.
 INCIDENT_CATEGORIES = (
     "violent",

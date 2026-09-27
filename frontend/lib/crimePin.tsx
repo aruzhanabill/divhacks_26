@@ -16,11 +16,28 @@ export function crimeSvg(category: Category): string {
   return `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="${GLYPH[category]}"/></svg>`;
 }
 
-export function crimePinElement(category: Category): HTMLDivElement {
+// Small train front used to badge transit calls and the "In subway" chip.
+export const TRAIN_GLYPH =
+  "M4 2h8a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm0 2v3.5h8V4H4zm1 5.2a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm6 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2zM5 13h2l-1.5 2H4zm4 0h2l1.5 2H10.5z";
+
+export function trainSvg(): string {
+  return `<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="${TRAIN_GLYPH}"/></svg>`;
+}
+
+export function crimePinElement(category: Category, transit = false): HTMLDivElement {
   const pin = document.createElement("div");
-  pin.className = "crime-pin";
-  pin.innerHTML = crimeSvg(category);
+  pin.className = transit ? "crime-pin crime-pin-transit" : "crime-pin";
+  pin.innerHTML = transit ? `${crimeSvg(category)}<span class="crime-pin-badge">${trainSvg()}</span>` : crimeSvg(category);
   return pin;
+}
+
+export function TrainGlyph({ hot = false }: { hot?: boolean }) {
+  return (
+    <span
+      className={`crime-pin crime-pin-inline crime-pin-train ${hot ? "crime-pin-train-hot" : ""}`}
+      dangerouslySetInnerHTML={{ __html: trainSvg() }}
+    />
+  );
 }
 
 export function lightPinElement(): HTMLDivElement {

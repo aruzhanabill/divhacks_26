@@ -18,6 +18,8 @@ export type Incident = {
   category: Category;
   severity: number;
   timestamp: string;
+  /** NYPD Transit Bureau job (typ_desc ends in "/TRANSIT"). Older rows may omit it. */
+  is_transit?: boolean;
   headline?: string | null;
 };
 

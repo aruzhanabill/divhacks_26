@@ -6,7 +6,7 @@ buffer, discounted by age against the end of the simulation window.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -72,6 +72,9 @@ class ScoreRequest(BaseModel):
     routes: list[RouteCandidate] = Field(min_length=1, max_length=6)
     corridor_meters: float = Field(default=DEFAULT_CORRIDOR_METERS, ge=50, le=500)
     sim_now: datetime | None = None
+    # Off by default: adds the time-of-day street-complaint baseline. Walking
+    # scores are byte-identical to before when this is false.
+    include_history: bool = False
 
 
 def decode_polyline(encoded: str) -> list[tuple[float, float]]:
@@ -144,8 +147,91 @@ def _window(requested: datetime | None = None) -> tuple[datetime, datetime, date
     return replay_start, replay_end, replay_end
 
 
+def explicit_window(requested: datetime | None = None) -> tuple[datetime, datetime, datetime]:
+    """Like `_window`, but an explicit `requested` anchor is honoured even outside the replay.
+
+    Walking scoring keeps the clamping behaviour above. Station and transit
+    scoring use this so a June anchor is scored in June when the replay is set
+    to tonight (and vice versa). Outside the replay the window is the hour up
+    to the anchor.
+    """
+    if requested is None:
+        return _window(None)
+    anchor = as_nyc(requested)
+    with pool.connection() as conn:
+        row = conn.execute("SELECT replay_start, replay_end FROM sim_state WHERE id = 1").fetchone()
+    if row is not None:
+        replay_start, replay_end = (as_nyc(value) for value in row)
+        if replay_start < anchor <= replay_end:
+            return replay_start, anchor, anchor
+    return anchor - timedelta(hours=1), anchor, anchor
+
+
 def _safety_score(weight: float) -> float:
     return round(100.0 / (1.0 + weight), 1)
+
+
+def corridor_terms(
+    conn,
+    wkt: str,
+    start: datetime,
+    end: datetime,
+    anchor: datetime,
+    corridor_meters: float,
+    include_history: bool = False,
+) -> dict:
+    """Raw crime and street-light terms for one LineString corridor.
+
+    Shared by walking route scoring and the walking legs of subway routes.
+    Returns weights (not scores) so callers can combine legs before scoring.
+    With `include_history`, adds the time-of-day street-complaint baseline as
+    breakdown key "history" and folds it into `weight`.
+    """
+    rows = conn.execute(
+        SCORE_SQL,
+        {
+            "anchor": anchor,
+            "tau": RECENCY_TAU_SECONDS,
+            "start": start,
+            "end": end,
+            "categories": list(CRIME_CATEGORIES),
+            "wkt": wkt,
+            "corridor_meters": corridor_meters,
+        },
+    ).fetchall()
+    breakdown = {
+        category: {"count": count, "weight": round(weight, 2)}
+        for category, count, weight in rows
+    }
+    incident_count = sum(item["count"] for item in breakdown.values())
+    weight = sum(item["weight"] for item in breakdown.values())
+    history = None
+    if include_history:
+        from app.mta.history import corridor_history  # local import: mta depends on this module
+
+        history = corridor_history(conn, wkt, corridor_meters, anchor)
+        breakdown["history"] = {"count": history["count"], "weight": history["weight"]}
+        weight += history["weight"]
+    light_row = conn.execute(
+        LIGHT_SQL,
+        {
+            "anchor": anchor,
+            "tau": LIGHT_TAU_SECONDS,
+            "start": anchor - LOOKBACK,
+            "end": anchor,
+            "wkt": wkt,
+            "corridor_meters": corridor_meters,
+        },
+    ).fetchone()
+    light_count, light_weight = light_row if light_row is not None else (0, 0.0)
+    return {
+        "breakdown": breakdown,
+        "incident_count": incident_count,
+        "weight": weight,
+        "light_count": light_count,
+        "light_weight": light_weight,
+        "history": history,
+    }
 
 
 def score_routes(body: ScoreRequest) -> dict:
@@ -156,46 +242,20 @@ def score_routes(body: ScoreRequest) -> dict:
     with pool.connection() as conn:
         for route in body.routes:
             wkt = _wkt(_points_for(route))
-            rows = conn.execute(
-                SCORE_SQL,
-                {
-                    "anchor": anchor,
-                    "tau": RECENCY_TAU_SECONDS,
-                    "start": start,
-                    "end": end,
-                    "categories": list(CRIME_CATEGORIES),
-                    "wkt": wkt,
-                    "corridor_meters": body.corridor_meters,
-                },
-            ).fetchall()
-            breakdown = {
-                category: {"count": count, "weight": round(weight, 2)}
-                for category, count, weight in rows
-            }
-            incident_count = sum(item["count"] for item in breakdown.values())
-            weight = sum(item["weight"] for item in breakdown.values())
-            light_row = conn.execute(
-                LIGHT_SQL,
-                {
-                    "anchor": anchor,
-                    "tau": LIGHT_TAU_SECONDS,
-                    "start": anchor - LOOKBACK,
-                    "end": anchor,
-                    "wkt": wkt,
-                    "corridor_meters": body.corridor_meters,
-                },
-            ).fetchone()
-            light_count, light_weight = light_row if light_row is not None else (0, 0.0)
-            results.append(
-                {
-                    "route_id": route.route_id,
-                    "safety_score": _safety_score(weight),
-                    "incident_count": incident_count,
-                    "breakdown": breakdown,
-                    "light_score": _safety_score(light_weight),
-                    "light_count": light_count,
-                }
+            terms = corridor_terms(
+                conn, wkt, start, end, anchor, body.corridor_meters, include_history=body.include_history
             )
+            item = {
+                "route_id": route.route_id,
+                "safety_score": _safety_score(terms["weight"]),
+                "incident_count": terms["incident_count"],
+                "breakdown": terms["breakdown"],
+                "light_score": _safety_score(terms["light_weight"]),
+                "light_count": terms["light_count"],
+            }
+            if terms["history"] is not None:
+                item["history"] = terms["history"]
+            results.append(item)
     return {
         "corridor_meters": body.corridor_meters,
         "start": start,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -12,12 +13,20 @@ from pydantic import BaseModel
 from app.db import close_db, init_db, pool
 from app.ingest import NYC, as_nyc, fetch_latest_add_ts, ingest_window
 from app.lights import ingest_street_lights
+from app.mta import bus, gtfsrt
+from app.mta.complaints import DEFAULT_LOOKBACK as COMPLAINT_LOOKBACK, ingest_complaints
+from app.mta.history import ingest_street_complaints
+from app.mta.realtime import ensure_fresh_status, refresh_status
+from app.mta.ridership import ingest_ridership, ingest_ridership_profile
+from app.mta.routes import TransitScoreRequest, score_transit_routes
+from app.mta.scoring import score_stations, scoring_context, station_detail
+from app.mta.stations import ingest_stations, station_count
 from app.reports import ingest_photo_report
-from app.scoring import ScoreRequest, score_routes
+from app.scoring import ScoreRequest, explicit_window, score_routes
 
 MAX_WINDOW = timedelta(hours=6)
 SELECT_INCIDENTS = """
-SELECT source_id, lat, lng, category, severity, timestamp, headline
+SELECT source_id, lat, lng, category, severity, timestamp, headline, is_transit
 FROM incidents
 WHERE timestamp >= %(start)s AND timestamp <= %(end)s
 ORDER BY timestamp, source_id
@@ -226,6 +235,150 @@ def live_reports() -> dict:
         "incidents": _rows(SELECT_PHOTON_INCIDENTS, photon),
         "street_lights": _rows(SELECT_PHOTON_LIGHTS, photon),
     }
+
+
+# --- MTA subway safety (additive; walking endpoints above are unchanged) ---
+
+
+class MtaIngestBody(BaseModel):
+    start: datetime
+    end: datetime
+    complaint_lookback_days: int = COMPLAINT_LOOKBACK.days
+    include_street: bool = True
+    include_bus: bool = True
+
+
+COMPLAINT_PUBLICATION_LAG = timedelta(days=100)
+
+
+def _history_range(start: datetime, end: datetime, lookback: timedelta) -> tuple[datetime, datetime]:
+    """NYPD complaint data is published quarterly, months behind. A lookback
+    from a window set to tonight would be empty, so the lookback is measured
+    from whichever is earlier: the window end, or now minus the lag."""
+    newest_plausible = datetime.now(NYC) - COMPLAINT_PUBLICATION_LAG
+    return min(end, newest_plausible) - lookback, end
+
+
+_mta_ingest_lock = threading.Lock()
+
+
+@app.post("/mta/ingest")
+def mta_ingest(body: MtaIngestBody) -> dict:
+    """Load station reference (once), subway + street complaints for the lookback, ridership baselines.
+
+    One load at a time: a second call while one is running returns {"busy": true}
+    instead of racing it on the same rows."""
+    if not _mta_ingest_lock.acquire(blocking=False):
+        return {"busy": True}
+    try:
+        return _mta_ingest(body)
+    finally:
+        _mta_ingest_lock.release()
+
+
+def _mta_ingest(body: MtaIngestBody) -> dict:
+    start, end = _check_window(body.start, body.end)
+    result: dict = {}
+    lookback = timedelta(days=max(1, min(365, body.complaint_lookback_days)))
+    hist_start, hist_end = _history_range(start, end, lookback)
+    try:
+        if station_count() == 0:
+            result["stations"] = ingest_stations()
+        else:
+            result["stations"] = {"fetched": 0, "upserted": 0, "cached": station_count()}
+        result["complaints"] = ingest_complaints(hist_start, hist_end)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:300] or "MTA / NYPD complaint request failed"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="MTA / NYPD complaint request failed") from exc
+    # Everything below is a normaliser or an optional term; a slow open-data host must not fail the load.
+    if body.include_street:
+        try:
+            result["street_complaints"] = ingest_street_complaints(hist_start, hist_end)
+        except Exception as exc:  # noqa: BLE001
+            result["street_complaints"] = {"error": str(exc)[:200]}
+    try:
+        result["ridership"] = ingest_ridership(start, end)
+    except Exception as exc:  # noqa: BLE001
+        result["ridership"] = {"error": str(exc)[:200]}
+    try:
+        result["ridership_profile"] = ingest_ridership_profile(end)
+    except Exception as exc:  # noqa: BLE001
+        result["ridership_profile"] = {"error": str(exc)[:200]}
+    if body.include_bus:
+        try:
+            result["bus_ridership"] = bus.ingest_bus_ridership(end)
+        except Exception as exc:  # noqa: BLE001
+            result["bus_ridership"] = {"error": str(exc)[:200]}
+    return result
+
+
+@app.get("/mta/realtime")
+def mta_realtime(complex_id: str | None = None, refresh: bool = False) -> dict:
+    """Live GTFS-RT state: routes running, and per-route waits / skipped stops for one complex."""
+    snapshot = gtfsrt.refresh(force=refresh) if refresh else gtfsrt.current()
+    if snapshot is None:
+        raise HTTPException(status_code=502, detail="GTFS-RT feeds unavailable")
+    out = gtfsrt.summary(snapshot)
+    if complex_id:
+        with pool.connection() as conn:
+            stops = gtfsrt.complex_stops(conn).get(complex_id)
+            row = conn.execute(
+                "SELECT array_agg(DISTINCT r) FROM subway_stations s, unnest(s.routes) r WHERE complex_id = %(id)s",
+                {"id": complex_id},
+            ).fetchone()
+        if not stops:
+            raise HTTPException(status_code=404, detail="unknown station complex")
+        out["complex_id"] = complex_id
+        out["station"] = snapshot.station_status(stops, list(row[0] or []))
+    try:
+        out["bus_alerts"] = {"routes_with_alerts": len(bus.alerts()["by_route"])}
+    except Exception:  # noqa: BLE001
+        out["bus_alerts"] = None
+    return out
+
+
+@app.get("/mta/status")
+def mta_status(refresh: bool = False) -> dict:
+    """Live subway alerts and elevator/escalator outages (cached 60 s, snapshot persisted)."""
+    try:
+        return refresh_status(force=refresh)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="MTA status feed request failed") from exc
+
+
+@app.post("/routes/transit/score")
+def routes_transit_score(body: TransitScoreRequest) -> dict:
+    """Subway / bus routes: walking legs by corridor plus the stops you wait at. Higher is safer."""
+    if body.include_live:
+        ensure_fresh_status()
+    return score_transit_routes(body)
+
+
+@app.get("/stations")
+def stations(sim_now: datetime | None = None, include_live: bool = False) -> dict:
+    """Every station complex with a safety score at the sim clock. Overlay data, not routing truth.
+
+    An explicit `sim_now` is honoured even outside the replay window."""
+    start, end, anchor = explicit_window(sim_now)
+    if include_live:
+        ensure_fresh_status()
+    with pool.connection() as conn:
+        items = score_stations(conn, anchor, start, end, include_live=include_live)
+        context = scoring_context(conn, anchor, include_live=include_live)
+    return {"sim_now": anchor, "start": start, "end": end, "count": len(items), "context": context, "stations": items}
+
+
+@app.get("/stations/{complex_id}")
+def station(complex_id: str, sim_now: datetime | None = None) -> dict:
+    start, end, anchor = explicit_window(sim_now)
+    ensure_fresh_status()
+    with pool.connection() as conn:
+        detail = station_detail(conn, complex_id, anchor, start, end)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="unknown station complex")
+    return {"sim_now": anchor, "start": start, "end": end, **detail}
 
 
 @app.get("/sim")

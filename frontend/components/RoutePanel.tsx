@@ -7,8 +7,30 @@ import { useFollow, useFollowLive } from "@/lib/follow";
 import { useTheme } from "@/lib/theme";
 import { metersToPath, pathFrom, pointAlong, type LatLng } from "@/lib/geo";
 import type { SelectedPlace } from "@/lib/googleMaps";
+import { LIVE_FLAGS, LIVE_REFRESH_MS, scoreBand } from "@/lib/stations";
+import { TrainGlyph } from "@/lib/crimePin";
+import {
+  departureTimeFor,
+  legsFromRoute,
+  routeLines,
+  shortLine,
+  type LegRequest,
+  type RouteMode,
+  type StationHop,
+  type TransitRouteScore,
+  type TransitScoreResponse,
+} from "@/lib/transit";
 
 const CORRIDOR_METERS = 150;
+
+function hopBadge(hop: StationHop): string {
+  const parts: string[] = [];
+  if (hop.flags.includes("no_service")) parts.push("no svc");
+  else if (hop.wait_min != null && hop.wait_min >= 1) parts.push(`⏱${Math.round(hop.wait_min)}m`);
+  if (hop.flags.includes("skipped_stops")) parts.push("skips");
+  if (hop.flags.some((flag) => flag === "service_alert" || flag === "equipment_outage")) parts.push("⚠");
+  return parts.join(" ");
+}
 
 function preferenceScore(route: RouteSummary, preferSafe: boolean, preferLit: boolean): number {
   const parts: number[] = [];
@@ -46,6 +68,13 @@ type RouteSummary = {
   incidentCount: number | null;
   lightScore: number | null;
   lightCount: number | null;
+  mode: RouteMode;
+  lines?: string[];
+  stations?: StationHop[];
+  walkScore?: number | null;
+  weakestStation?: number | null;
+  longestWait?: number | null;
+  historyCount?: number | null;
 };
 
 type RoutePanelProps = {
@@ -67,6 +96,11 @@ export function RoutePanel({
   const live = useFollowLive();
   const { theme, toggleTheme } = useTheme();
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<RouteMode>("walk");
+  // Walk mode only: adds the time-of-day street-complaint history to the corridor
+  // score. Off by default so walking scores stay exactly as before.
+  const [useHistory, setUseHistory] = useState(false);
+  const [liveInfo, setLiveInfo] = useState<{ observedAt: string; routes: number } | null>(null);
   const [preferSafe, setPreferSafe] = useState(true);
   const [preferLit, setPreferLit] = useState(true);
   const [locating, setLocating] = useState(false);
@@ -91,6 +125,9 @@ export function RoutePanel({
   const liveRef = useRef(live);
   const preferSafeRef = useRef(preferSafe);
   const preferLitRef = useRef(preferLit);
+  const modeRef = useRef(mode);
+  const useHistoryRef = useRef(useHistory);
+  const transitLegsRef = useRef<LegRequest[][] | null>(null);
   const friendPhoneRef = useRef(friendPhone);
   callsRef.current = follow.calls;
   friendPhoneRef.current = friendPhone;
@@ -98,6 +135,8 @@ export function RoutePanel({
   liveRef.current = live;
   preferSafeRef.current = preferSafe;
   preferLitRef.current = preferLit;
+  modeRef.current = mode;
+  useHistoryRef.current = useHistory;
 
   const clearAltLines = useCallback(() => {
     altLinesRef.current.forEach((line) => line.setMap(null));
@@ -202,6 +241,7 @@ export function RoutePanel({
           body: JSON.stringify({
             corridor_meters: CORRIDOR_METERS,
             sim_now: simNow,
+            include_history: useHistoryRef.current,
             routes: result.routes.map((route, index) => ({
               route_id: String(index),
               path: route.overview_path.map((point) => ({
@@ -230,6 +270,7 @@ export function RoutePanel({
             incidentCount: score?.incident_count ?? null,
             lightScore: score?.light_score ?? null,
             lightCount: score?.light_count ?? null,
+            mode: "walk" as const,
           };
         });
         const chosen = pickIndex(nextSummaries, preferSafeRef.current, preferLitRef.current);
@@ -283,12 +324,189 @@ export function RoutePanel({
     [clearAltLines, destination, map, origin, routesLib],
   );
 
+  /**
+   * Score already-planned transit alternatives. Used right after Directions
+   * returns and again every minute while live, so waits, skipped stops and
+   * alerts stay current without re-asking Google.
+   */
+  const scoreTransitLegs = useCallback(
+    async (result: google.maps.DirectionsResult, legsByRoute: LegRequest[][], transitMode: "subway" | "bus") => {
+      const clock = liveRef.current;
+      const simNow = clock.simMs != null ? new Date(clock.simMs).toISOString() : undefined;
+      const scoreResponse = await fetch("/api/routes/transit/score", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          corridor_meters: CORRIDOR_METERS,
+          sim_now: simNow,
+          include_live: true,
+          include_history: true,
+          routes: legsByRoute.map((legs, index) => ({ route_id: String(index), legs })),
+        }),
+      });
+      if (!scoreResponse.ok) {
+        const body = await scoreResponse.json().catch(() => null);
+        const detail = body && typeof body.detail === "string" ? body.detail : "";
+        throw new Error(detail || `Could not score ${transitMode} routes`);
+      }
+      const scored = (await scoreResponse.json()) as TransitScoreResponse;
+      setLiveInfo(
+        scored.realtime
+          ? { observedAt: scored.realtime.observed_at, routes: scored.realtime.routes_running.length }
+          : null,
+      );
+      const byId = new Map(scored.routes.map((route) => [route.route_id, route]));
+      const label = transitMode === "bus" ? "bus" : "train";
+      return result.routes.map((route, index): RouteSummary => {
+        const leg = route.legs[0];
+        const score = byId.get(String(index));
+        const lines = (score?.lines?.length ? score.lines : routeLines(legsByRoute[index])).map(shortLine);
+        return {
+          index,
+          distance: leg?.distance?.text ?? "—",
+          duration: leg?.duration?.text ?? "—",
+          summary: lines.length > 0 ? `${lines.join(" → ")} ${label}` : `${transitMode} route ${index + 1}`,
+          safetyScore: score?.safety_score ?? null,
+          incidentCount: score?.incident_count ?? null,
+          lightScore: score?.light_score ?? null,
+          lightCount: score?.light_count ?? null,
+          mode: transitMode,
+          lines,
+          stations: score?.stations ?? [],
+          walkScore: score?.walk_score ?? null,
+          weakestStation: score?.weakest_station_score ?? null,
+          longestWait: score?.longest_wait_min ?? null,
+          historyCount: score?.history_count ?? null,
+        };
+      });
+    },
+    [],
+  );
+
+  /**
+   * Subway / bus mode. Same Directions service with TRANSIT, then each
+   * alternative is split into walking legs (corridor-scored) and rides
+   * (scored by the stops you wait at) by POST /routes/transit/score. The
+   * walking path above is untouched; this is a separate request path.
+   *
+   * Google only plans transit for the near future, so the departure time is
+   * the sim clock's NYC weekday and time-of-day in the coming week.
+   */
+  const requestTransitRoute = useCallback(
+    async (transitMode: "subway" | "bus") => {
+      if (!routesLib) {
+        setError("Directions library is still loading.");
+        return;
+      }
+      const start = origin?.location;
+      const end = destinationRef.current;
+      if (!start || !end) {
+        setError("Choose an origin and a destination.");
+        return;
+      }
+
+      setLoading(true);
+      setError("");
+      setRerouted(false);
+      const service = new routesLib.DirectionsService();
+
+      try {
+        const result = await service.route({
+          origin: start,
+          destination: end.location,
+          travelMode: google.maps.TravelMode.TRANSIT,
+          transitOptions: {
+            modes: [transitMode === "bus" ? google.maps.TransitMode.BUS : google.maps.TransitMode.SUBWAY],
+            departureTime: departureTimeFor(liveRef.current.simMs),
+          },
+          provideRouteAlternatives: true,
+        });
+        resultRef.current = result;
+        const legsByRoute = result.routes.map((route) => legsFromRoute(route));
+        transitLegsRef.current = legsByRoute;
+        const nextSummaries = await scoreTransitLegs(result, legsByRoute, transitMode);
+        const chosen = pickIndex(nextSummaries, preferSafeRef.current, preferLitRef.current);
+        const chosenPath = result.routes[chosen]?.overview_path.map((point) => ({
+          lat: point.lat(),
+          lng: point.lng(),
+        }));
+        activePathRef.current = chosenPath ?? [];
+        routeAnchorProgress.current = liveRef.current.progress;
+        handledCalls.current = new Set(callsRef.current.map((call) => call.source_id));
+        rendererRef.current?.setDirections(result);
+        setSummaries(nextSummaries);
+        setSafestIndex(preferSafeRef.current || preferLitRef.current ? chosen : null);
+        setSelectedIndex(chosen);
+      } catch (err) {
+        resultRef.current = null;
+        transitLegsRef.current = null;
+        rendererRef.current?.set("directions", null);
+        rendererRef.current?.setMap(map ?? null);
+        clearAltLines();
+        setSummaries([]);
+        setSafestIndex(null);
+        activePathRef.current = [];
+        const status = err instanceof Error ? err.message : "Directions request failed";
+        setError(
+          status.includes("ZERO_RESULTS")
+            ? `No ${transitMode} routes found between those places.`
+            : status,
+        );
+      } finally {
+        setLoading(false);
+      }
+    },
+    [clearAltLines, map, origin, routesLib, scoreTransitLegs],
+  );
+
+  const requestForMode = useCallback(() => {
+    if (modeRef.current === "subway" || modeRef.current === "bus") return requestTransitRoute(modeRef.current);
+    return requestRoute();
+  }, [requestRoute, requestTransitRoute]);
+
+  // Live re-score: every minute while a transit result is shown, re-run the
+  // scoring (not the Directions request) so waits, skipped stops and alerts
+  // track the feeds. If the safest alternative changes, the pick follows it.
+  useEffect(() => {
+    if (mode === "walk" || summaries.length === 0) return;
+    const timer = window.setInterval(() => {
+      const result = resultRef.current;
+      const legs = transitLegsRef.current;
+      const current = modeRef.current;
+      if (!result || !legs || current === "walk") return;
+      void scoreTransitLegs(result, legs, current)
+        .then((next) => {
+          if (resultRef.current === result) setSummaries(next);
+        })
+        .catch(() => undefined);
+    }, LIVE_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [mode, scoreTransitLegs, summaries.length]);
+
   useEffect(() => {
     if (summaries.length === 0) return;
     const chosen = pickIndex(summaries, preferSafe, preferLit);
     setSafestIndex(preferSafe || preferLit ? chosen : null);
     setSelectedIndex(chosen);
   }, [preferLit, preferSafe, summaries]);
+
+  // Switching modes with a pair already chosen re-requests in the new mode.
+  const lastModeRef = useRef(mode);
+  useEffect(() => {
+    if (lastModeRef.current === mode) return;
+    lastModeRef.current = mode;
+    if (origin && destination) void requestForMode();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
+  // Toggling history in Walk mode re-scores the walking alternatives.
+  const lastHistoryRef = useRef(useHistory);
+  useEffect(() => {
+    if (lastHistoryRef.current === useHistory) return;
+    lastHistoryRef.current = useHistory;
+    if (modeRef.current === "walk" && origin && destination) void requestRoute();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [useHistory]);
 
   useEffect(() => {
     if (!map) return;
@@ -346,7 +564,16 @@ export function RoutePanel({
 
   useEffect(() => {
     const clock = liveRef.current;
-    if (!preferSafe || !clock.playing || !destination || activePathRef.current.length < 2 || rerouteLock.current) {
+    // Live reroute around a new call only applies to walking. Subway routes are
+    // fixed to their stations, so a nearby street call does not re-plan them.
+    if (
+      modeRef.current !== "walk" ||
+      !preferSafe ||
+      !clock.playing ||
+      !destination ||
+      activePathRef.current.length < 2 ||
+      rerouteLock.current
+    ) {
       return;
     }
     const span = Math.max(0.001, 1 - routeAnchorProgress.current);
@@ -415,6 +642,38 @@ export function RoutePanel({
             <div className="flex gap-1">
               <button
                 type="button"
+                aria-pressed={mode === "walk"}
+                onClick={() => setMode("walk")}
+                className="chip inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium"
+                title="Walking routes"
+              >
+                <WalkIcon />
+                Walk
+              </button>
+              <button
+                type="button"
+                aria-pressed={mode === "subway"}
+                onClick={() => setMode("subway")}
+                className="chip inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium"
+                title="Subway routes scored by station safety"
+              >
+                <TrainGlyph hot={mode === "subway"} />
+                Subway
+              </button>
+              <button
+                type="button"
+                aria-pressed={mode === "bus"}
+                onClick={() => setMode("bus")}
+                className="chip inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium"
+                title="Bus routes scored by the stops you wait at"
+              >
+                <BusIcon hot={mode === "bus"} />
+                Bus
+              </button>
+            </div>
+            <div className="flex gap-1">
+              <button
+                type="button"
                 aria-pressed={preferSafe}
                 onClick={() => setPreferSafe((value) => !value)}
                 className="chip inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium"
@@ -431,8 +690,8 @@ export function RoutePanel({
                 <LampIcon />
                 Well-lit
               </button>
+              <span className="self-center text-xs font-medium text-[var(--muted)]">{preferenceCount} of 2</span>
             </div>
-            <span className="text-xs font-medium text-[var(--muted)]">{preferenceCount} of 2</span>
           </div>
           <div className="flex flex-col gap-2 px-3 pb-3">
             <label className="hud-label block" htmlFor="route-origin">
@@ -467,7 +726,7 @@ export function RoutePanel({
               <button
                 type="button"
                 aria-label="Directions"
-                onClick={() => void requestRoute()}
+                onClick={() => void requestForMode()}
                 disabled={loading}
                 className="mb-0.5 grid h-10 w-10 shrink-0 place-items-center bg-[var(--accent)] text-white disabled:opacity-50"
               >
@@ -488,6 +747,28 @@ export function RoutePanel({
               />
             </label>
           </div>
+          {mode === "walk" ? (
+            <label className="flex items-center gap-2 px-3 pb-2 text-xs text-[var(--muted)]">
+              <input
+                type="checkbox"
+                checked={useHistory}
+                onChange={(event) => setUseHistory(event.target.checked)}
+                className="accent-[var(--accent)]"
+              />
+              Include historical crime for this time of day
+            </label>
+          ) : (
+            <p className="px-3 pb-2 text-[10px] text-[var(--muted)]">
+              Scored with historical complaints for this time of day
+              {liveInfo
+                ? ` · live MTA feed ${new Intl.DateTimeFormat("en-US", {
+                    timeZone: "America/New_York",
+                    hour: "numeric",
+                    minute: "2-digit",
+                  }).format(new Date(liveInfo.observedAt))}, ${liveInfo.routes} lines running`
+                : ""}
+            </p>
+          )}
           {error ? <p className="px-3 pb-2 text-xs text-red-400">{error}</p> : null}
           {rerouted ? <p className="px-3 pb-2 text-xs text-[var(--good)]">Route updated around a nearby call.</p> : null}
           {summaries.length > 0 ? (
@@ -542,6 +823,47 @@ export function RoutePanel({
                               : ""}
                             {route.summary ? ` · ${route.summary}` : ""}
                           </span>
+                          {route.mode !== "walk" && route.stations && route.stations.length > 0 ? (
+                            <span className="mt-1 flex flex-wrap items-center gap-1">
+                              {route.lines?.map((line) => (
+                                <span key={line} className={`route-bullet${route.mode === "bus" ? " route-bullet-bus" : ""}`}>
+                                  {line}
+                                </span>
+                              ))}
+                              {route.stations.map((hop, hopIndex) => {
+                                const badge = hopBadge(hop);
+                                const liveHop = hop.flags.some((flag) => LIVE_FLAGS.has(flag));
+                                const tip = [
+                                  `${hop.role}: ${hop.name ?? "stop"} · ${hop.safety_score ?? "—"}`,
+                                  hop.wait_min != null ? `wait ${Math.round(hop.wait_min)} min (${hop.wait_source ?? "scheduled"})` : "",
+                                  hop.quiet ? "quiet at this hour" : "",
+                                  ...hop.notes,
+                                ]
+                                  .filter(Boolean)
+                                  .join("\n");
+                                return (
+                                  <span
+                                    key={`${hop.complex_id ?? hop.name}-${hopIndex}`}
+                                    className={`station-chip station-chip-${scoreBand(hop.safety_score)}${liveHop ? " station-chip-live" : ""}`}
+                                    title={tip}
+                                  >
+                                    {hop.role === "transfer" ? "⇄ " : hop.role === "alight" ? "→ " : ""}
+                                    {(hop.name ?? "stop").replace(/ ?- ?/g, "-").slice(0, 22)}
+                                    {hop.safety_score != null ? ` ${hop.safety_score}` : ""}
+                                    {badge ? <span className="station-chip-badge">{badge}</span> : null}
+                                  </span>
+                                );
+                              })}
+                              {route.walkScore != null && preferSafe ? (
+                                <span className="text-[10px] text-[var(--muted)]">
+                                  walk {route.walkScore}
+                                  {route.longestWait != null && route.longestWait >= 1
+                                    ? ` · wait up to ${Math.round(route.longestWait)} min`
+                                    : ""}
+                                </span>
+                              ) : null}
+                            </span>
+                          ) : null}
                         </span>
                       </button>
                     </li>
@@ -581,6 +903,28 @@ function DirectionsIcon() {
       <path
         fill="currentColor"
         d="m21.71 11.29-9-9a1 1 0 0 0-1.42 0l-9 9a1 1 0 0 0 0 1.42l9 9a1 1 0 0 0 1.42 0l9-9a1 1 0 0 0 0-1.42M14 14.5V12h-4v3H8v-4a1 1 0 0 1 1-1h5V7.5l3.5 3.5z"
+      />
+    </svg>
+  );
+}
+
+function WalkIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M13.5 5.5a2 2 0 1 0 0-4 2 2 0 0 0 0 4M9.8 8.9 7 23h2.1l1.8-8 2.1 2v6h2v-7.5l-2.1-2 .6-3c1.3 1.5 3.3 2.5 5.5 2.5v-2c-1.9 0-3.5-1-4.3-2.4l-1-1.6c-.4-.6-1-1-1.7-1-.3 0-.5.1-.8.1L6 8.3V13h2V9.6z"
+      />
+    </svg>
+  );
+}
+
+function BusIcon({ hot = false }: { hot?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" className={`h-4 w-4 shrink-0 ${hot ? "text-[var(--good)]" : ""}`} aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M4 16c0 .88.39 1.67 1 2.22V20a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1h8v1a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1.78c.61-.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4S4 2.5 4 6zm3.5 1a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3m9 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3M18 11H6V6h12z"
       />
     </svg>
   );
