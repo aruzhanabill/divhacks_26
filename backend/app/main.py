@@ -89,7 +89,9 @@ def _merge_rows(primary: list[dict], extra: list[dict]) -> list[dict]:
 
 def _latest_stored() -> datetime | None:
     with pool.connection() as conn:
-        row = conn.execute("SELECT max(timestamp) FROM incidents").fetchone()
+        row = conn.execute(
+            "SELECT max(timestamp) FROM incidents WHERE source_id NOT LIKE 'photon:%'"
+        ).fetchone()
     if row is None or row[0] is None:
         return None
     return row[0]
