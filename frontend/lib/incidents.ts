@@ -18,6 +18,16 @@ export type Incident = {
   category: Category;
   severity: number;
   timestamp: string;
+  headline?: string | null;
+};
+
+export type StreetLight = {
+  source_id: string;
+  lat: number;
+  lng: number;
+  severity: number;
+  timestamp: string;
+  headline?: string | null;
 };
 
 export const CATEGORY_LABEL: Record<Category, string> = {

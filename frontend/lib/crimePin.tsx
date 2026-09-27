@@ -23,6 +23,13 @@ export function crimePinElement(category: Category): HTMLDivElement {
   return pin;
 }
 
+export function lightPinElement(): HTMLDivElement {
+  const pin = document.createElement("div");
+  pin.className = "crime-pin light-pin";
+  pin.innerHTML = crimeSvg("other");
+  return pin;
+}
+
 export function CrimeGlyph({ category }: { category: Category }) {
   return <span className="crime-pin crime-pin-inline" dangerouslySetInnerHTML={{ __html: crimeSvg(category) }} />;
 }
