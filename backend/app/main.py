@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -20,14 +21,35 @@ from app.mta.ridership import ingest_ridership, ingest_ridership_profile
 from app.mta.routes import TransitScoreRequest, score_transit_routes
 from app.mta.scoring import score_stations, scoring_context, station_detail
 from app.mta.stations import ingest_stations, station_count
+from app.reports import ingest_photo_report
 from app.scoring import ScoreRequest, explicit_window, score_routes
 
 MAX_WINDOW = timedelta(hours=6)
 SELECT_INCIDENTS = """
-SELECT source_id, lat, lng, category, severity, timestamp, is_transit
+SELECT source_id, lat, lng, category, severity, timestamp, headline, is_transit
 FROM incidents
 WHERE timestamp >= %(start)s AND timestamp <= %(end)s
 ORDER BY timestamp, source_id
+"""
+SELECT_LIGHTS = """
+SELECT source_id, lat, lng, severity, timestamp, headline
+FROM street_lights
+WHERE timestamp >= %(start)s AND timestamp <= %(end)s
+ORDER BY timestamp, source_id
+"""
+SELECT_PHOTON_INCIDENTS = """
+SELECT source_id, lat, lng, category, severity, timestamp, headline
+FROM incidents
+WHERE source_id LIKE %(prefix)s
+ORDER BY timestamp DESC
+LIMIT 50
+"""
+SELECT_PHOTON_LIGHTS = """
+SELECT source_id, lat, lng, severity, timestamp, headline
+FROM street_lights
+WHERE source_id LIKE %(prefix)s
+ORDER BY timestamp DESC
+LIMIT 50
 """
 
 
@@ -42,6 +64,14 @@ class SimBody(BaseModel):
     replay_end: datetime
 
 
+class ReportBody(BaseModel):
+    caption: str | None = None
+    lat: float | None = None
+    lng: float | None = None
+    message_id: str | None = None
+    image_base64: str | None = None
+
+
 def _check_window(start: datetime, end: datetime) -> tuple[datetime, datetime]:
     start = as_nyc(start)
     end = as_nyc(end)
@@ -52,16 +82,25 @@ def _check_window(start: datetime, end: datetime) -> tuple[datetime, datetime]:
     return start, end
 
 
-def _rows(start: datetime, end: datetime) -> list[dict]:
+def _rows(sql: str, params: dict) -> list[dict]:
     with pool.connection() as conn:
-        cur = conn.execute(SELECT_INCIDENTS, {"start": start, "end": end})
+        cur = conn.execute(sql, params)
         columns = [col.name for col in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
+def _merge_rows(primary: list[dict], extra: list[dict]) -> list[dict]:
+    by_id = {row["source_id"]: row for row in primary}
+    for row in extra:
+        by_id[row["source_id"]] = row
+    return list(by_id.values())
+
+
 def _latest_stored() -> datetime | None:
     with pool.connection() as conn:
-        row = conn.execute("SELECT max(timestamp) FROM incidents").fetchone()
+        row = conn.execute(
+            "SELECT max(timestamp) FROM incidents WHERE source_id NOT LIKE 'photon:%'"
+        ).fetchone()
     if row is None or row[0] is None:
         return None
     return row[0]
@@ -171,12 +210,30 @@ def incidents(
         )
     if until < since:
         until = since
+    photon = {"prefix": "photon:%"}
     return {
         "sim_now": until,
         "start": since,
         "end": until,
         "timezone": str(NYC),
-        "incidents": _rows(since, until),
+        "incidents": _merge_rows(
+            _rows(SELECT_INCIDENTS, {"start": since, "end": until}),
+            _rows(SELECT_PHOTON_INCIDENTS, photon),
+        ),
+        "street_lights": _merge_rows(
+            _rows(SELECT_LIGHTS, {"start": since, "end": until}),
+            _rows(SELECT_PHOTON_LIGHTS, photon),
+        ),
+    }
+
+
+@app.get("/reports/live")
+def live_reports() -> dict:
+    """Photon rows only, so the map can show a just-logged pin without a replay window."""
+    photon = {"prefix": "photon:%"}
+    return {
+        "incidents": _rows(SELECT_PHOTON_INCIDENTS, photon),
+        "street_lights": _rows(SELECT_PHOTON_LIGHTS, photon),
     }
 
 
@@ -330,6 +387,26 @@ def get_sim() -> dict:
     if stored is None:
         raise HTTPException(status_code=404, detail="simulation clock is not set")
     return stored
+
+
+@app.post("/reports")
+def create_report(body: ReportBody) -> dict:
+    """Classify a Photon (or test) photo and upsert into incidents or street_lights."""
+    image = None
+    if body.image_base64:
+        try:
+            image = base64.b64decode(body.image_base64, validate=False)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="image_base64 is not valid") from exc
+        if len(image) > 8_000_000:
+            raise HTTPException(status_code=413, detail="image is too large")
+    return ingest_photo_report(
+        image=image,
+        caption=body.caption,
+        lat=body.lat,
+        lng=body.lng,
+        message_id=body.message_id,
+    )
 
 
 @app.put("/sim")

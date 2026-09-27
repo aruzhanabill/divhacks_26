@@ -109,6 +109,11 @@ body {
   height: 16px;
 }
 
+.crime-pin.light-pin {
+  background: #facc15;
+  color: #071422;
+}
+
 .crime-pin-inline {
   width: 16px;
   height: 16px;

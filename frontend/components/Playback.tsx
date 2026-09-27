@@ -1,10 +1,12 @@
 "use client";
 
+/// <reference types="google.maps" />
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMap } from "@vis.gl/react-google-maps";
 import { StationLayer } from "@/components/StationLayer";
 import { useFollowLive, usePublishFollow, type RevealedCall } from "@/lib/follow";
-import { CrimeGlyph, TrainGlyph, crimePinElement } from "@/lib/crimePin";
+import { CrimeGlyph, TrainGlyph, crimePinElement, lightPinElement } from "@/lib/crimePin";
 import { useTheme } from "@/lib/theme";
 import {
   CATEGORIES,
@@ -14,6 +16,7 @@ import {
   formatNyc,
   type Category,
   type Incident,
+  type StreetLight,
 } from "@/lib/incidents";
 
 const WINDOWS = [
@@ -42,6 +45,16 @@ async function readError(response: Response): Promise<string> {
   return `Request failed (${response.status})`;
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] ?? char);
+}
+
+function pinLabel(incident: Incident): string {
+  const headline = incident.headline?.trim();
+  if (headline) return headline;
+  return CATEGORY_LABEL[incident.category];
+}
+
 export function Playback() {
   const { theme, toggleTheme } = useTheme();
   const map = useMap();
@@ -55,6 +68,7 @@ export function Playback() {
   const [stationsLive, setStationsLive] = useState(false);
   const [latestLabel, setLatestLabel] = useState<string | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [streetLights, setStreetLights] = useState<StreetLight[]>([]);
   const [batchId, setBatchId] = useState("");
   const [replayStart, setReplayStart] = useState<string | null>(null);
   const [replayEnd, setReplayEnd] = useState<string | null>(null);
@@ -83,6 +97,7 @@ export function Playback() {
   const playingRef = useRef(playing);
   const pitchRef = useRef(pitchSeconds);
   const incidentsRef = useRef(incidents);
+  const streetLightsRef = useRef(streetLights);
   const categoriesRef = useRef(categories);
   const startRef = useRef<number | null>(null);
   const endRef = useRef<number | null>(null);
@@ -95,6 +110,7 @@ export function Playback() {
   playingRef.current = playing;
   pitchRef.current = pitchSeconds;
   incidentsRef.current = incidents;
+  streetLightsRef.current = streetLights;
   categoriesRef.current = categories;
   heatmapOnRef.current = heatmapOn;
   transitOnlyRef.current = transitOnly;
@@ -110,17 +126,90 @@ export function Playback() {
     progressRef.current = seek.progress;
   }
 
-  const showStored = useCallback((payload: { incidents: Incident[]; start: string; end: string }) => {
-    setIncidents(payload.incidents);
-    setReplayStart(payload.start);
-    setReplayEnd(payload.end);
-    setBatchId(`${payload.start}:${payload.incidents.length}:${Date.now()}`);
-    setProgress(0);
-    setVisibleCount(0);
-    setSimMs(Date.parse(payload.start));
-    setSeek({ id: Date.now(), progress: 0 });
-    setStatus(payload.incidents.length > 0 ? "ready" : "idle");
-  }, []);
+  const showStored = useCallback(
+    (payload: { incidents: Incident[]; street_lights?: StreetLight[]; start: string; end: string }) => {
+      setIncidents(payload.incidents);
+      setStreetLights(payload.street_lights ?? []);
+      setReplayStart(payload.start);
+      setReplayEnd(payload.end);
+      setBatchId(`${payload.start}:${payload.incidents.length}:${Date.now()}`);
+      setProgress(0);
+      setVisibleCount(0);
+      setSimMs(Date.parse(payload.start));
+      setSeek({ id: Date.now(), progress: 0 });
+      const hasPoints = payload.incidents.length > 0 || (payload.street_lights?.length ?? 0) > 0;
+      setStatus(hasPoints ? "ready" : "idle");
+    },
+    [],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const mergePhoton = (incoming: Incident[], incomingLights: StreetLight[]) => {
+      setIncidents((current) => {
+        const known = new Set(current.map((item) => item.source_id));
+        const extra = incoming.filter((item) => !known.has(item.source_id));
+        if (extra.length === 0) return current;
+        const photonCats = extra
+          .filter((item) => item.source_id.startsWith("photon:"))
+          .map((item) => item.category);
+        if (photonCats.length > 0) {
+          setCategories((selected) => {
+            const next = [...selected];
+            for (const category of photonCats) {
+              if (!next.includes(category)) next.push(category);
+            }
+            return next;
+          });
+        }
+        return [...current, ...extra];
+      });
+      setStreetLights((current) => {
+        const known = new Set(current.map((item) => item.source_id));
+        const extra = incomingLights.filter((item) => !known.has(item.source_id));
+        return extra.length === 0 ? current : [...current, ...extra];
+      });
+    };
+    const pullLive = async () => {
+      try {
+        const response = await fetch("/api/reports/live");
+        if (!response.ok) return;
+        const payload = (await response.json()) as { incidents?: Incident[]; street_lights?: StreetLight[] };
+        if (cancelled) return;
+        mergePhoton(payload.incidents ?? [], payload.street_lights ?? []);
+      } catch {
+        /* backend may still be starting */
+      }
+    };
+    void pullLive();
+    const liveTimer = window.setInterval(() => void pullLive(), 3000);
+
+    if (!replayStart || !replayEnd) {
+      return () => {
+        cancelled = true;
+        window.clearInterval(liveTimer);
+      };
+    }
+    const pullWindow = async () => {
+      const params = new URLSearchParams({ start: replayStart, end: replayEnd });
+      try {
+        const response = await fetch(`/api/incidents?${params.toString()}`);
+        if (!response.ok) return;
+        const payload = (await response.json()) as { incidents: Incident[]; street_lights?: StreetLight[] };
+        if (cancelled) return;
+        mergePhoton(payload.incidents ?? [], payload.street_lights ?? []);
+      } catch {
+        /* keep the loaded window if the live poll fails */
+      }
+    };
+    void pullWindow();
+    const windowTimer = window.setInterval(() => void pullWindow(), 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(liveTimer);
+      window.clearInterval(windowTimer);
+    };
+  }, [replayStart, replayEnd]);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,6 +232,7 @@ export function Playback() {
         if (!incidentsResponse.ok || cancelled) return;
         const payload = (await incidentsResponse.json()) as {
           incidents: Incident[];
+          street_lights?: StreetLight[];
           start: string;
           end: string;
         };
@@ -186,11 +276,12 @@ export function Playback() {
     let frame = 0;
     let last = performance.now();
     let lastEmit = 0;
+    let lastPhotonPan = "";
     let heatSignature = "";
     let Pin: typeof google.maps.marker.AdvancedMarkerElement | null = null;
-    void google.maps.importLibrary("marker").then((lib) => {
+    void google.maps.importLibrary("marker").then((lib: google.maps.MarkerLibrary) => {
       if (cancelled) return;
-      Pin = (lib as google.maps.MarkerLibrary).AdvancedMarkerElement;
+      Pin = lib.AdvancedMarkerElement;
     });
 
     const draw = (simMsValue: number) => {
@@ -199,23 +290,34 @@ export function Playback() {
         for (const marker of markers.values()) marker.map = null;
         markers.clear();
         heatSignature = "";
-        const batch = incidentsRef.current;
+        const batch = [
+          ...incidentsRef.current.map((incident) => ({ lat: incident.lat, lng: incident.lng })),
+          ...streetLightsRef.current.map((light) => ({ lat: light.lat, lng: light.lng })),
+        ];
         if (batch.length > 0) {
           const bounds = new google.maps.LatLngBounds();
-          for (const incident of batch) bounds.extend({ lat: incident.lat, lng: incident.lng });
+          for (const point of batch) bounds.extend(point);
           map.fitBounds(bounds, { top: 72, right: 48, bottom: 160, left: 48 });
         }
       }
 
       const allowed = new Set(categoriesRef.current);
       const transitFilter = transitOnlyRef.current;
-      const visible = incidentsRef.current.filter(
-        (incident) =>
-          allowed.has(incident.category) &&
-          (!transitFilter || incident.is_transit === true) &&
-          Date.parse(incident.timestamp) <= simMsValue,
-      );
-      const visibleIds = new Set(visible.map((incident) => incident.source_id));
+      const visible = incidentsRef.current.filter((incident) => {
+        const live = incident.source_id.startsWith("photon:");
+        if (!allowed.has(incident.category) && !live) return false;
+        if (transitFilter && incident.is_transit !== true) return false;
+        if (live) return true;
+        return Date.parse(incident.timestamp) <= simMsValue;
+      });
+      const visibleLights = streetLightsRef.current.filter((light) => {
+        if (light.source_id.startsWith("photon:")) return true;
+        return Date.parse(light.timestamp) <= simMsValue;
+      });
+      const visibleIds = new Set([
+        ...visible.map((incident) => incident.source_id),
+        ...visibleLights.map((light) => `light:${light.source_id}`),
+      ]);
       for (const [id, marker] of markers) {
         if (!visibleIds.has(id)) {
           marker.map = null;
@@ -229,24 +331,57 @@ export function Playback() {
           map,
           position: { lat: incident.lat, lng: incident.lng },
           content: crimePinElement(incident.category, incident.is_transit === true),
-          title: incident.is_transit ? `${CATEGORY_LABEL[incident.category]} · Transit` : CATEGORY_LABEL[incident.category],
+          title: incident.is_transit ? `${pinLabel(incident)} · Transit` : pinLabel(incident),
         });
         marker.addListener("click", () => {
           const when = new Intl.DateTimeFormat("en-US", {
             timeZone: "America/New_York",
             month: "short",
             day: "numeric",
+            year: "numeric",
             hour: "numeric",
             minute: "2-digit",
             second: "2-digit",
           }).format(new Date(incident.timestamp));
           const where = incident.is_transit ? "<span>In the subway system</span>" : "";
           infoRef.current?.setContent(
-            `<div class="callout"><strong>${CATEGORY_LABEL[incident.category]}</strong><span>${when}</span>${where}</div>`,
+            `<div class="callout"><strong>${escapeHtml(pinLabel(incident))}</strong><span>${when}</span>${where}</div>`,
           );
           infoRef.current?.open({ map, anchor: marker });
         });
         markers.set(incident.source_id, marker);
+        if (incident.source_id.startsWith("photon:") && lastPhotonPan !== incident.source_id) {
+          lastPhotonPan = incident.source_id;
+          map.panTo({ lat: incident.lat, lng: incident.lng });
+          if ((map.getZoom() ?? 12) < 15) map.setZoom(16);
+        }
+      }
+
+      for (const light of visibleLights) {
+        const id = `light:${light.source_id}`;
+        if (markers.has(id) || !Pin) continue;
+        const marker = new Pin({
+          map,
+          position: { lat: light.lat, lng: light.lng },
+          content: lightPinElement(),
+          title: light.headline?.trim() || "Street light out",
+        });
+        marker.addListener("click", () => {
+          const when = new Intl.DateTimeFormat("en-US", {
+            timeZone: "America/New_York",
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+            second: "2-digit",
+          }).format(new Date(light.timestamp));
+          infoRef.current?.setContent(
+            `<div class="callout"><strong>${escapeHtml(light.headline?.trim() || "Street light out")}</strong><span>${when}</span></div>`,
+          );
+          infoRef.current?.open({ map, anchor: marker });
+        });
+        markers.set(id, marker);
       }
 
       const signature = `${heatmapOnRef.current}:${transitFilter}:${categoriesRef.current.join(",")}:${visible.length}:${visible.at(-1)?.source_id ?? ""}`;
@@ -261,7 +396,7 @@ export function Playback() {
         );
         heat.setMap(heatmapOnRef.current ? map : null);
       }
-      return visible.length;
+      return visible.length + visibleLights.length;
     };
 
     const tick = (now: number) => {
@@ -341,10 +476,11 @@ export function Playback() {
 
   const filteredTotal = useMemo(() => {
     const allowed = new Set(categories);
-    return incidents.filter(
+    const calls = incidents.filter(
       (incident) => allowed.has(incident.category) && (!transitOnly || incident.is_transit === true),
     ).length;
-  }, [incidents, categories, transitOnly]);
+    return calls + streetLights.length;
+  }, [incidents, categories, streetLights, transitOnly]);
 
   const transitTotal = useMemo(() => incidents.filter((incident) => incident.is_transit === true).length, [incidents]);
 
@@ -375,6 +511,7 @@ export function Playback() {
       if (!incidentsResponse.ok) throw new Error(await readError(incidentsResponse));
       const payload = (await incidentsResponse.json()) as {
         incidents: Incident[];
+        street_lights?: StreetLight[];
         start: string;
         end: string;
       };
@@ -442,7 +579,8 @@ export function Playback() {
           />
         </label>
         <p className="mt-1 text-xs text-[var(--muted)]">
-          {latestLabel ? `Latest call ${latestLabel}` : "Times are New York local."}
+          {latestLabel ? `Latest NYPD call ${latestLabel}` : "Times are New York local."} Photos you text Photon
+          stay on the map; the slider only walks through this replay hour.
         </p>
 
         <p className="hud-label mt-3">History in this replay</p>
@@ -530,7 +668,7 @@ export function Playback() {
           </button>
           <button
             type="button"
-            disabled={status !== "ready" || incidents.length === 0}
+            disabled={status !== "ready" || (incidents.length === 0 && streetLights.length === 0)}
             onClick={() => {
               if (!playing && progress >= 1) {
                 setProgress(0);
@@ -557,7 +695,9 @@ export function Playback() {
         <div className="mt-3 flex items-baseline justify-between">
           <strong className="text-2xl font-semibold tabular-nums">{visibleCount}</strong>
           <span className="text-xs text-[var(--muted)]">
-            {status === "ready" ? `of ${filteredTotal} shown · ${incidents.length} stored` : "nothing loaded"}
+            {status === "ready"
+              ? `of ${filteredTotal} shown · ${incidents.length} stored${streetLights.length ? ` · ${streetLights.length} dark lamps` : ""}`
+              : "nothing loaded"}
           </span>
         </div>
         <input

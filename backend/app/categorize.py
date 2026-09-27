@@ -77,6 +77,17 @@ _TRANSIT_NEEDLES = ("/TRANSIT", "TRANSIT BUREAU", "TRANSIT PATROL", "TRAIN RUN",
 def is_transit(typ_desc: str | None) -> bool:
     text = (typ_desc or "").upper()
     return any(needle in text for needle in _TRANSIT_NEEDLES)
+# Closed set used by the map, minus `other`. Citizen photo reports use these.
+INCIDENT_CATEGORIES = (
+    "violent",
+    "property",
+    "disorder",
+    "alarm",
+    "traffic",
+    "medical",
+    "admin",
+)
+CATEGORY_SEVERITY = {name: weight for name, weight, _ in _RULES}
 
 
 def categorize(typ_desc: str | None, cip_jobs: str | None) -> tuple[str, float]:

@@ -20,6 +20,16 @@ export type Incident = {
   timestamp: string;
   /** NYPD Transit Bureau job (typ_desc ends in "/TRANSIT"). Older rows may omit it. */
   is_transit?: boolean;
+  headline?: string | null;
+};
+
+export type StreetLight = {
+  source_id: string;
+  lat: number;
+  lng: number;
+  severity: number;
+  timestamp: string;
+  headline?: string | null;
 };
 
 export const CATEGORY_LABEL: Record<Category, string> = {

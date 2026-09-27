@@ -111,12 +111,14 @@ export function RoutePanel({
   const [summaries, setSummaries] = useState<RouteSummary[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [safestIndex, setSafestIndex] = useState<number | null>(null);
+  const [friendPhone, setFriendPhone] = useState("");
   const rendererRef = useRef<google.maps.DirectionsRenderer | null>(null);
   const altLinesRef = useRef<google.maps.Polyline[]>([]);
   const resultRef = useRef<google.maps.DirectionsResult | null>(null);
   const activePathRef = useRef<LatLng[]>([]);
   const routeAnchorProgress = useRef(0);
   const handledCalls = useRef(new Set<string>());
+  const arrivedSent = useRef(false);
   const rerouteLock = useRef(false);
   const callsRef = useRef(follow.calls);
   const destinationRef = useRef(destination);
@@ -126,7 +128,9 @@ export function RoutePanel({
   const modeRef = useRef(mode);
   const useHistoryRef = useRef(useHistory);
   const transitLegsRef = useRef<LegRequest[][] | null>(null);
+  const friendPhoneRef = useRef(friendPhone);
   callsRef.current = follow.calls;
+  friendPhoneRef.current = friendPhone;
   destinationRef.current = destination;
   liveRef.current = live;
   preferSafeRef.current = preferSafe;
@@ -278,7 +282,19 @@ export function RoutePanel({
         routeAnchorProgress.current = liveRef.current.progress;
         if (!from) {
           handledCalls.current = new Set(callsRef.current.map((call) => call.source_id));
+          arrivedSent.current = false;
           setRerouted(false);
+          const friend = friendPhoneRef.current.trim();
+          if (friend) {
+            void fetch("/api/checkin/leaving", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                friend,
+                destination: placeLabel(end),
+              }),
+            }).catch(() => undefined);
+          }
         }
         rendererRef.current?.setDirections(result);
         setSummaries(nextSummaries);
@@ -531,6 +547,22 @@ export function RoutePanel({
   }, [map]);
 
   useEffect(() => {
+    if (!destination || activePathRef.current.length < 2 || arrivedSent.current) return;
+    const span = Math.max(0.001, 1 - routeAnchorProgress.current);
+    const fraction = Math.min(1, Math.max(0, (follow.progress - routeAnchorProgress.current) / span));
+    if (fraction < 0.98) return;
+    arrivedSent.current = true;
+    void fetch("/api/checkin/arrived", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        destination: placeLabel(destination),
+        friend: friendPhoneRef.current.trim() || undefined,
+      }),
+    }).catch(() => undefined);
+  }, [destination, follow.progress, summaries.length]);
+
+  useEffect(() => {
     const clock = liveRef.current;
     // Live reroute around a new call only applies to walking. Subway routes are
     // fixed to their stations, so a nearby street call does not re-plan them.
@@ -701,6 +733,19 @@ export function RoutePanel({
                 <DirectionsIcon />
               </button>
             </div>
+            <label className="hud-label block" htmlFor="route-friend">
+              Text a friend when I arrive
+              <input
+                id="route-friend"
+                type="tel"
+                inputMode="tel"
+                autoComplete="tel"
+                placeholder="Friend’s number"
+                value={friendPhone}
+                onChange={(event) => setFriendPhone(event.target.value)}
+                className="hud-field"
+              />
+            </label>
           </div>
           {mode === "walk" ? (
             <label className="flex items-center gap-2 px-3 pb-2 text-xs text-[var(--muted)]">

@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS street_lights (
 CREATE INDEX IF NOT EXISTS street_lights_geom_gix ON street_lights USING GIST (geom);
 CREATE INDEX IF NOT EXISTS street_lights_timestamp_idx ON street_lights (timestamp);
 
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS headline TEXT;
+ALTER TABLE street_lights ADD COLUMN IF NOT EXISTS headline TEXT;
+
 CREATE TABLE IF NOT EXISTS sim_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     sim_now TIMESTAMPTZ NOT NULL,

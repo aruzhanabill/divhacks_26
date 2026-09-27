@@ -1,0 +1,18 @@
+{
+  "name": "safepath-photon",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx index.ts",
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@photon-ai/imessage-kit": "3.0.0-rc.2",
+    "spectrum-ts": "^12.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3"
+  }
+}

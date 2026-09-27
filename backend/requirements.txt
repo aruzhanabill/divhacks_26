@@ -4,3 +4,5 @@ httpx>=0.27
 psycopg[binary,pool]>=3.2
 pydantic>=2.9
 gtfs-realtime-bindings>=1.0
+pillow>=11.0
+pillow-heif>=0.21
