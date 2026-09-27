@@ -18,6 +18,7 @@ export type Incident = {
   category: Category;
   severity: number;
   timestamp: string;
+  headline?: string | null;
 };
 
 export type StreetLight = {
@@ -26,6 +27,7 @@ export type StreetLight = {
   lng: number;
   severity: number;
   timestamp: string;
+  headline?: string | null;
 };
 
 export const CATEGORY_LABEL: Record<Category, string> = {

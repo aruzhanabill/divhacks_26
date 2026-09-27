@@ -17,16 +17,30 @@ from app.scoring import ScoreRequest, score_routes
 
 MAX_WINDOW = timedelta(hours=6)
 SELECT_INCIDENTS = """
-SELECT source_id, lat, lng, category, severity, timestamp
+SELECT source_id, lat, lng, category, severity, timestamp, headline
 FROM incidents
 WHERE timestamp >= %(start)s AND timestamp <= %(end)s
 ORDER BY timestamp, source_id
 """
 SELECT_LIGHTS = """
-SELECT source_id, lat, lng, severity, timestamp
+SELECT source_id, lat, lng, severity, timestamp, headline
 FROM street_lights
 WHERE timestamp >= %(start)s AND timestamp <= %(end)s
 ORDER BY timestamp, source_id
+"""
+SELECT_PHOTON_INCIDENTS = """
+SELECT source_id, lat, lng, category, severity, timestamp, headline
+FROM incidents
+WHERE source_id LIKE %(prefix)s
+ORDER BY timestamp DESC
+LIMIT 50
+"""
+SELECT_PHOTON_LIGHTS = """
+SELECT source_id, lat, lng, severity, timestamp, headline
+FROM street_lights
+WHERE source_id LIKE %(prefix)s
+ORDER BY timestamp DESC
+LIMIT 50
 """
 
 
@@ -59,11 +73,18 @@ def _check_window(start: datetime, end: datetime) -> tuple[datetime, datetime]:
     return start, end
 
 
-def _rows(sql: str, start: datetime, end: datetime) -> list[dict]:
+def _rows(sql: str, params: dict) -> list[dict]:
     with pool.connection() as conn:
-        cur = conn.execute(sql, {"start": start, "end": end})
+        cur = conn.execute(sql, params)
         columns = [col.name for col in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+def _merge_rows(primary: list[dict], extra: list[dict]) -> list[dict]:
+    by_id = {row["source_id"]: row for row in primary}
+    for row in extra:
+        by_id[row["source_id"]] = row
+    return list(by_id.values())
 
 
 def _latest_stored() -> datetime | None:
@@ -178,13 +199,30 @@ def incidents(
         )
     if until < since:
         until = since
+    photon = {"prefix": "photon:%"}
     return {
         "sim_now": until,
         "start": since,
         "end": until,
         "timezone": str(NYC),
-        "incidents": _rows(SELECT_INCIDENTS, since, until),
-        "street_lights": _rows(SELECT_LIGHTS, since, until),
+        "incidents": _merge_rows(
+            _rows(SELECT_INCIDENTS, {"start": since, "end": until}),
+            _rows(SELECT_PHOTON_INCIDENTS, photon),
+        ),
+        "street_lights": _merge_rows(
+            _rows(SELECT_LIGHTS, {"start": since, "end": until}),
+            _rows(SELECT_PHOTON_LIGHTS, photon),
+        ),
+    }
+
+
+@app.get("/reports/live")
+def live_reports() -> dict:
+    """Photon rows only, so the map can show a just-logged pin without a replay window."""
+    photon = {"prefix": "photon:%"}
+    return {
+        "incidents": _rows(SELECT_PHOTON_INCIDENTS, photon),
+        "street_lights": _rows(SELECT_PHOTON_LIGHTS, photon),
     }
 
 

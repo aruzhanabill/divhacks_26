@@ -7,7 +7,8 @@
     "start": "tsx index.ts"
   },
   "dependencies": {
-    "spectrum-ts": "^0.4.0"
+    "@photon-ai/imessage-kit": "3.0.0-rc.2",
+    "spectrum-ts": "^12.10.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",

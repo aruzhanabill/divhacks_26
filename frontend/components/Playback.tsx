@@ -42,6 +42,16 @@ async function readError(response: Response): Promise<string> {
   return `Request failed (${response.status})`;
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] ?? char);
+}
+
+function pinLabel(incident: Incident): string {
+  const headline = incident.headline?.trim();
+  if (headline) return headline;
+  return CATEGORY_LABEL[incident.category];
+}
+
 export function Playback() {
   const { theme, toggleTheme } = useTheme();
   const map = useMap();
@@ -126,49 +136,70 @@ export function Playback() {
   );
 
   useEffect(() => {
-    if (!replayStart || !replayEnd) return;
     let cancelled = false;
-    const pull = async () => {
+    const mergePhoton = (incoming: Incident[], incomingLights: StreetLight[]) => {
+      setIncidents((current) => {
+        const known = new Set(current.map((item) => item.source_id));
+        const extra = incoming.filter((item) => !known.has(item.source_id));
+        if (extra.length === 0) return current;
+        const photonCats = extra
+          .filter((item) => item.source_id.startsWith("photon:"))
+          .map((item) => item.category);
+        if (photonCats.length > 0) {
+          setCategories((selected) => {
+            const next = [...selected];
+            for (const category of photonCats) {
+              if (!next.includes(category)) next.push(category);
+            }
+            return next;
+          });
+        }
+        return [...current, ...extra];
+      });
+      setStreetLights((current) => {
+        const known = new Set(current.map((item) => item.source_id));
+        const extra = incomingLights.filter((item) => !known.has(item.source_id));
+        return extra.length === 0 ? current : [...current, ...extra];
+      });
+    };
+    const pullLive = async () => {
+      try {
+        const response = await fetch("/api/reports/live");
+        if (!response.ok) return;
+        const payload = (await response.json()) as { incidents?: Incident[]; street_lights?: StreetLight[] };
+        if (cancelled) return;
+        mergePhoton(payload.incidents ?? [], payload.street_lights ?? []);
+      } catch {
+        /* backend may still be starting */
+      }
+    };
+    void pullLive();
+    const liveTimer = window.setInterval(() => void pullLive(), 3000);
+
+    if (!replayStart || !replayEnd) {
+      return () => {
+        cancelled = true;
+        window.clearInterval(liveTimer);
+      };
+    }
+    const pullWindow = async () => {
       const params = new URLSearchParams({ start: replayStart, end: replayEnd });
       try {
         const response = await fetch(`/api/incidents?${params.toString()}`);
         if (!response.ok) return;
         const payload = (await response.json()) as { incidents: Incident[]; street_lights?: StreetLight[] };
         if (cancelled) return;
-        const incoming = payload.incidents ?? [];
-        const incomingLights = payload.street_lights ?? [];
-        setIncidents((current) => {
-          const known = new Set(current.map((item) => item.source_id));
-          const extra = incoming.filter((item) => !known.has(item.source_id));
-          if (extra.length === 0) return current;
-          const photonCats = extra
-            .filter((item) => item.source_id.startsWith("photon:"))
-            .map((item) => item.category);
-          if (photonCats.length > 0) {
-            setCategories((selected) => {
-              const next = [...selected];
-              for (const category of photonCats) {
-                if (!next.includes(category)) next.push(category);
-              }
-              return next;
-            });
-          }
-          return [...current, ...extra];
-        });
-        setStreetLights((current) => {
-          const known = new Set(current.map((item) => item.source_id));
-          const extra = incomingLights.filter((item) => !known.has(item.source_id));
-          return extra.length === 0 ? current : [...current, ...extra];
-        });
+        mergePhoton(payload.incidents ?? [], payload.street_lights ?? []);
       } catch {
         /* keep the loaded window if the live poll fails */
       }
     };
-    void pull();
-    const timer = window.setInterval(() => void pull(), 4000);
+    void pullWindow();
+    const windowTimer = window.setInterval(() => void pullWindow(), 4000);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      window.clearInterval(liveTimer);
+      window.clearInterval(windowTimer);
     };
   }, [replayStart, replayEnd]);
 
@@ -237,6 +268,7 @@ export function Playback() {
     let frame = 0;
     let last = performance.now();
     let lastEmit = 0;
+    let lastPhotonPan = "";
     let heatSignature = "";
     let Pin: typeof google.maps.marker.AdvancedMarkerElement | null = null;
     void google.maps.importLibrary("marker").then((lib) => {
@@ -250,21 +282,28 @@ export function Playback() {
         for (const marker of markers.values()) marker.map = null;
         markers.clear();
         heatSignature = "";
-        const batch = incidentsRef.current;
+        const batch = [
+          ...incidentsRef.current.map((incident) => ({ lat: incident.lat, lng: incident.lng })),
+          ...streetLightsRef.current.map((light) => ({ lat: light.lat, lng: light.lng })),
+        ];
         if (batch.length > 0) {
           const bounds = new google.maps.LatLngBounds();
-          for (const incident of batch) bounds.extend({ lat: incident.lat, lng: incident.lng });
+          for (const point of batch) bounds.extend(point);
           map.fitBounds(bounds, { top: 72, right: 48, bottom: 160, left: 48 });
         }
       }
 
       const allowed = new Set(categoriesRef.current);
-      const visible = incidentsRef.current.filter(
-        (incident) => allowed.has(incident.category) && Date.parse(incident.timestamp) <= simMsValue,
-      );
-      const visibleLights = streetLightsRef.current.filter(
-        (light) => Date.parse(light.timestamp) <= simMsValue,
-      );
+      const visible = incidentsRef.current.filter((incident) => {
+        const live = incident.source_id.startsWith("photon:");
+        if (!allowed.has(incident.category) && !live) return false;
+        if (live) return true;
+        return Date.parse(incident.timestamp) <= simMsValue;
+      });
+      const visibleLights = streetLightsRef.current.filter((light) => {
+        if (light.source_id.startsWith("photon:")) return true;
+        return Date.parse(light.timestamp) <= simMsValue;
+      });
       const visibleIds = new Set([
         ...visible.map((incident) => incident.source_id),
         ...visibleLights.map((light) => `light:${light.source_id}`),
@@ -282,23 +321,29 @@ export function Playback() {
           map,
           position: { lat: incident.lat, lng: incident.lng },
           content: crimePinElement(incident.category),
-          title: CATEGORY_LABEL[incident.category],
+          title: pinLabel(incident),
         });
         marker.addListener("click", () => {
           const when = new Intl.DateTimeFormat("en-US", {
             timeZone: "America/New_York",
             month: "short",
             day: "numeric",
+            year: "numeric",
             hour: "numeric",
             minute: "2-digit",
             second: "2-digit",
           }).format(new Date(incident.timestamp));
           infoRef.current?.setContent(
-            `<div class="callout"><strong>${CATEGORY_LABEL[incident.category]}</strong><span>${when}</span></div>`,
+            `<div class="callout"><strong>${escapeHtml(pinLabel(incident))}</strong><span>${when}</span></div>`,
           );
           infoRef.current?.open({ map, anchor: marker });
         });
         markers.set(incident.source_id, marker);
+        if (incident.source_id.startsWith("photon:") && lastPhotonPan !== incident.source_id) {
+          lastPhotonPan = incident.source_id;
+          map.panTo({ lat: incident.lat, lng: incident.lng });
+          if ((map.getZoom() ?? 12) < 15) map.setZoom(16);
+        }
       }
 
       for (const light of visibleLights) {
@@ -308,19 +353,20 @@ export function Playback() {
           map,
           position: { lat: light.lat, lng: light.lng },
           content: lightPinElement(),
-          title: "Street light out",
+          title: light.headline?.trim() || "Street light out",
         });
         marker.addListener("click", () => {
           const when = new Intl.DateTimeFormat("en-US", {
             timeZone: "America/New_York",
             month: "short",
             day: "numeric",
+            year: "numeric",
             hour: "numeric",
             minute: "2-digit",
             second: "2-digit",
           }).format(new Date(light.timestamp));
           infoRef.current?.setContent(
-            `<div class="callout"><strong>Street light out</strong><span>${when}</span></div>`,
+            `<div class="callout"><strong>${escapeHtml(light.headline?.trim() || "Street light out")}</strong><span>${when}</span></div>`,
           );
           infoRef.current?.open({ map, anchor: marker });
         });
@@ -419,8 +465,9 @@ export function Playback() {
 
   const filteredTotal = useMemo(() => {
     const allowed = new Set(categories);
-    return incidents.filter((incident) => allowed.has(incident.category)).length;
-  }, [incidents, categories]);
+    const calls = incidents.filter((incident) => allowed.has(incident.category)).length;
+    return calls + streetLights.length;
+  }, [incidents, categories, streetLights]);
 
   const clockText = simMs != null ? formatNyc(simMs) : "Load a window to start";
 
@@ -575,7 +622,7 @@ export function Playback() {
           </button>
           <button
             type="button"
-            disabled={status !== "ready" || incidents.length === 0}
+            disabled={status !== "ready" || (incidents.length === 0 && streetLights.length === 0)}
             onClick={() => {
               if (!playing && progress >= 1) {
                 setProgress(0);

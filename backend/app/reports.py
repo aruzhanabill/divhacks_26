@@ -2,8 +2,8 @@
 
 Images are classified into the seven mapped incident categories or a
 street-light outage, then upserted into the same PostGIS tables the map and
-route scorer already read. Timestamps follow `sim_now` so a report lands in
-the replay window instead of wall-clock now.
+route scorer already read. The pin time is when the photo was taken (EXIF)
+or when the report was uploaded, not the simulation clock.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import BytesIO
 from typing import Any
 
@@ -21,8 +21,8 @@ from PIL import Image, UnidentifiedImageError
 
 from app.categorize import CATEGORY_SEVERITY, INCIDENT_CATEGORIES, categorize
 from app.db import pool
-from app.ingest import NYC, UPSERT as INCIDENT_UPSERT, as_nyc, _in_nyc
-from app.lights import DARK, UPSERT as LIGHT_UPSERT
+from app.ingest import NYC, as_nyc, _in_nyc
+from app.lights import DARK
 
 try:
     from pillow_heif import register_heif_opener
@@ -31,12 +31,66 @@ try:
 except ImportError:
     pass
 
+INCIDENT_UPSERT = """
+INSERT INTO incidents (source_id, lat, lng, geom, category, severity, timestamp, headline)
+VALUES (
+    %(source_id)s,
+    %(lat)s,
+    %(lng)s,
+    ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
+    %(category)s,
+    %(severity)s,
+    %(timestamp)s,
+    %(headline)s
+)
+ON CONFLICT (source_id) DO UPDATE SET
+    lat = EXCLUDED.lat,
+    lng = EXCLUDED.lng,
+    geom = EXCLUDED.geom,
+    category = EXCLUDED.category,
+    severity = EXCLUDED.severity,
+    timestamp = EXCLUDED.timestamp,
+    headline = EXCLUDED.headline
+"""
+
+LIGHT_UPSERT = """
+INSERT INTO street_lights (source_id, lat, lng, geom, severity, timestamp, headline)
+VALUES (
+    %(source_id)s,
+    %(lat)s,
+    %(lng)s,
+    ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
+    %(severity)s,
+    %(timestamp)s,
+    %(headline)s
+)
+ON CONFLICT (source_id) DO UPDATE SET
+    lat = EXCLUDED.lat,
+    lng = EXCLUDED.lng,
+    geom = EXCLUDED.geom,
+    severity = EXCLUDED.severity,
+    timestamp = EXCLUDED.timestamp,
+    headline = EXCLUDED.headline
+"""
+
+_HEADLINE = {
+    "violent": "Violent crime",
+    "property": "Property crime",
+    "disorder": "Disorder",
+    "alarm": "Alarm",
+    "traffic": "Car crash",
+    "medical": "Medical emergency",
+    "admin": "Police activity",
+}
 VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
 OPENAI_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1/chat/completions")
 GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 
 _LIGHT_NEEDLES = (
     "STREET LIGHT",
+    "STREETLIGHT",
     "STREETLAMP",
     "STREET LAMP",
     "LAMPPOST",
@@ -62,6 +116,51 @@ _COORD = re.compile(
     r"(?P<lat>-?\d{1,2}\.\d+)\s*[, ]\s*(?P<lng>-?\d{1,3}\.\d+)"
 )
 
+# Longest needles first. All tokens in a row must appear in the text.
+_PLACE_ALIASES: tuple[tuple[tuple[str, ...], float, float], ...] = (
+    (("COLUMBIA", "116"), 40.80754, -73.96257),
+    (("COLUMBIA", "BROADWAY"), 40.80754, -73.96257),
+    (("COLUMBIA", "GATES"), 40.80754, -73.96257),
+    (("COLLEGE WALK",), 40.80754, -73.96257),
+    (("116TH", "BROADWAY"), 40.80754, -73.96257),
+    (("116", "BROADWAY"), 40.80754, -73.96257),
+    (("COLUMBIA UNIVERSITY",), 40.80754, -73.96257),
+    (("COLUMBIA",), 40.80754, -73.96257),
+    (("TIMES SQUARE",), 40.7580, -73.9855),
+    (("UNION SQUARE",), 40.7359, -73.9911),
+    (("WASHINGTON SQUARE",), 40.7308, -73.9973),
+    (("GRAND CENTRAL",), 40.7527, -73.9772),
+    (("PENN STATION",), 40.7506, -73.9935),
+)
+
+_EVENT_WORDS = re.compile(
+    r"\b(car|crash|crashed|collision|accident|wreck|hit|and run|stolen|theft|"
+    r"burglary|assault|robbery|fight|harass(?:ment)?|lamp|streetlight|"
+    r"street light|broken|photo|picture|image|in front of|near|at|on|"
+    r"tonight|today|please|report)\b",
+    re.I,
+)
+_INTERSECTION = re.compile(
+    r"(?P<street>\d+)\s*(?:st|nd|rd|th)?(?:\s+street|\s+st)?\s*(?:and|&|/)\s*(?P<ave>[A-Za-z][A-Za-z]+(?:\s+(?:avenue|ave|street|st))?)"
+    r"|"
+    r"(?P<ave2>[A-Za-z][A-Za-z]+(?:\s+(?:avenue|ave))?)\s*(?:and|&|/)\s*(?P<street2>\d+)\s*(?:st|nd|rd|th)?",
+    re.I,
+)
+
+# Street-centerline at 116th. Columbus/Amsterdam sit south of Broadway because
+# the numbered streets run slightly south as you go east.
+_AVENUE_AT_116 = {
+    "BROADWAY": (40.8079, -73.9647),
+    "AMSTERDAM": (40.8064, -73.9612),
+    "COLUMBUS": (40.8052, -73.9606),
+    "RIVERSIDE": (40.8076, -73.9710),
+    "CLAREMONT": (40.8074, -73.9649),
+    "MORNINGSIDE": (40.8058, -73.9600),
+    "WESTEND": (40.8078, -73.9734),
+}
+_LAT_PER_STREET = 0.00072
+_BROADWAY_LNG_PER_STREET = 0.00046
+
 _VISION_SCHEMA = """Return JSON only with this shape:
 {
   "kind": "incident" | "street_light" | "unrelated",
@@ -84,29 +183,66 @@ kind=unrelated if it is not a street scene of those things.
 """
 
 
-def _read_sim() -> dict | None:
-    with pool.connection() as conn:
-        cur = conn.execute(
-            "SELECT sim_now, replay_start, replay_end FROM sim_state WHERE id = 1"
-        )
-        row = cur.fetchone()
-    if row is None:
+def headline_for(kind: str, category: str | None, caption: str | None, summary: str | None) -> str:
+    text = f"{caption or ''} {summary or ''}".upper()
+    if kind == "street_light":
+        return "Street light out"
+    if category == "traffic":
+        if any(word in text for word in ("CRASH", "COLLISION", "WRECK", "ACCIDENT")):
+            return "Car crash"
+        return "Traffic incident"
+    if category == "violent":
+        if "SHOOT" in text or "GUN" in text:
+            return "Shooting"
+        if "STABB" in text:
+            return "Stabbing"
+        if "ROBBERY" in text:
+            return "Robbery"
+        if "ASSAULT" in text:
+            return "Assault"
+        return _HEADLINE["violent"]
+    if summary:
+        short = summary.strip().split(".")[0].strip()
+        if 3 < len(short) <= 48:
+            return short[:1].upper() + short[1:]
+    if category in _HEADLINE:
+        return _HEADLINE[category]
+    return "Citizen report"
+
+
+def datetime_from_image(data: bytes) -> datetime | None:
+    try:
+        image = Image.open(BytesIO(data))
+    except (UnidentifiedImageError, OSError):
         return None
-    return {"sim_now": row[0], "replay_start": row[1], "replay_end": row[2]}
+    exif = image.getexif()
+    if not exif:
+        return None
+    raw = exif.get(0x9003) or exif.get(0x9004) or exif.get(0x0132)
+    if not raw:
+        try:
+            extra = exif.get_ifd(0x8769)
+        except Exception:
+            extra = {}
+        raw = extra.get(0x9003) or extra.get(0x9004)
+    if not raw:
+        return None
+    text = str(raw).strip()
+    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y:%m:%d %H:%M:%S%z"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return as_nyc(parsed)
+        except ValueError:
+            continue
+    return None
 
 
-def report_timestamp() -> datetime:
-    stored = _read_sim()
-    if stored is None:
-        return datetime.now(tz=NYC)
-    start = as_nyc(stored["replay_start"])
-    end = as_nyc(stored["replay_end"])
-    now = as_nyc(stored["sim_now"])
-    if now < start:
-        return start
-    if now >= end:
-        return end - timedelta(seconds=1)
-    return now
+def report_timestamp(image: bytes | None = None) -> datetime:
+    if image:
+        taken = datetime_from_image(image)
+        if taken is not None:
+            return taken
+    return datetime.now(tz=NYC)
 
 
 def gps_from_image(data: bytes) -> tuple[float, float] | None:
@@ -156,34 +292,133 @@ def coords_from_caption(caption: str | None) -> tuple[float, float] | None:
     return lat, lng
 
 
-def geocode_place(place_text: str | None) -> tuple[float, float] | None:
-    query = (place_text or "").strip()
-    if not query:
+def coords_from_known_place(text: str | None) -> tuple[float, float] | None:
+    if not text:
         return None
-    key = os.environ.get("GOOGLE_MAPS_GEOCODE_KEY") or os.environ.get("GOOGLE_MAPS_API_KEY")
-    if not key:
+    upper = re.sub(r"[^A-Z0-9 ]+", " ", text.upper())
+    upper = re.sub(r"\s+", " ", upper)
+    for needles, lat, lng in _PLACE_ALIASES:
+        if all(needle in upper for needle in needles):
+            return lat, lng
+    return None
+
+
+def coords_from_intersection(text: str | None) -> tuple[float, float] | None:
+    if not text:
         return None
-    with httpx.Client(timeout=20) as client:
-        response = client.get(
-            GEOCODE_URL,
-            params={"address": query, "components": "administrative_area:NY|country:US", "key": key},
-        )
-        response.raise_for_status()
-        payload = response.json()
-    results = payload.get("results") or []
-    if not results:
+    match = _INTERSECTION.search(text)
+    if not match:
         return None
-    location = results[0].get("geometry", {}).get("location") or {}
+    street_raw = match.group("street") or match.group("street2")
+    avenue_raw = match.group("ave") or match.group("ave2")
+    if not street_raw or not avenue_raw:
+        return None
     try:
-        lat = float(location["lat"])
-        lng = float(location["lng"])
+        street = int(street_raw)
+    except ValueError:
+        return None
+    avenue = (avenue_raw or "").upper()
+    avenue = re.sub(r"\s+(AVENUE|AVE|STREET)$", "", avenue)
+    avenue = re.sub(r"\s+", "", avenue)
+    if avenue in {"WESTEND", "WEST"}:
+        avenue = "WESTEND"
+    origin = _AVENUE_AT_116.get(avenue)
+    if origin is None or not (1 <= street <= 220):
+        return None
+    lat0, lng0 = origin
+    lat = lat0 + (street - 116) * _LAT_PER_STREET
+    lng = lng0
+    if avenue == "BROADWAY":
+        lng = lng0 + (street - 116) * _BROADWAY_LNG_PER_STREET
+    return lat, lng
+
+
+def place_candidates(*blobs: str | None) -> list[str]:
+    seen: list[str] = []
+
+    def add(value: str | None) -> None:
+        text = (value or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+
+    for blob in blobs:
+        if not blob:
+            continue
+        add(blob)
+        for line in blob.splitlines():
+            add(line)
+        stripped = _EVENT_WORDS.sub(" ", blob)
+        stripped = re.sub(r"\s+", " ", stripped).strip(" ,.")
+        add(stripped)
+        for match in _INTERSECTION.finditer(blob):
+            street = match.group("street") or match.group("street2")
+            avenue = match.group("ave") or match.group("ave2")
+            if street and avenue:
+                add(f"{street}th Street and {avenue}")
+                add(f"{avenue} and {street}th")
+    return seen
+
+
+def _coords_from_location(location: dict) -> tuple[float, float] | None:
+    try:
+        return float(location["lat"]), float(location["lng"])
     except (KeyError, TypeError, ValueError):
         return None
-    return lat, lng
+
+
+def geocode_place(place_text: str | None) -> tuple[float, float] | None:
+    known = coords_from_known_place(place_text)
+    if known:
+        return known
+    query = (place_text or "").strip()
+    leftover = re.sub(r"\s+", " ", _EVENT_WORDS.sub(" ", query)).strip(" ,.")
+    if leftover:
+        known = coords_from_known_place(leftover)
+        if known:
+            return known
+    grid = coords_from_intersection(place_text) or coords_from_intersection(leftover)
+    if not leftover or len(leftover) < 4:
+        return grid
+    searches = [leftover, f"{leftover}, Manhattan, New York, NY"]
+    key = os.environ.get("GOOGLE_MAPS_GEOCODE_KEY") or os.environ.get("GOOGLE_MAPS_API_KEY")
+    if key:
+        try:
+            with httpx.Client(timeout=20) as client:
+                for address in searches:
+                    response = client.get(
+                        GEOCODE_URL,
+                        params={"address": address, "components": "administrative_area:NY|country:US", "key": key},
+                    )
+                    if not response.is_success:
+                        continue
+                    results = response.json().get("results") or []
+                    if results:
+                        found = _coords_from_location(results[0].get("geometry", {}).get("location") or {})
+                        if found:
+                            return found
+        except httpx.HTTPError:
+            pass
+    try:
+        with httpx.Client(timeout=20, headers={"User-Agent": "safepath-photon/1.0"}) as client:
+            response = client.get(
+                NOMINATIM_URL,
+                params={"q": searches[-1], "format": "jsonv2", "limit": 1},
+            )
+            response.raise_for_status()
+            results = response.json()
+    except httpx.HTTPError:
+        return grid
+    if not results:
+        return grid
+    try:
+        return float(results[0]["lat"]), float(results[0]["lon"])
+    except (KeyError, TypeError, ValueError, IndexError):
+        return grid
 
 
 def _as_jpeg(data: bytes) -> bytes:
     image = Image.open(BytesIO(data))
+    image.thumbnail((1280, 1280))
     if image.mode not in {"RGB", "L"}:
         image = image.convert("RGB")
     elif image.mode == "L":
@@ -214,6 +449,7 @@ def classify_from_caption(caption: str | None) -> dict | None:
             "kind": "street_light",
             "category": None,
             "summary": text[:180],
+            "headline": "Street light out",
             "place_text": text,
             "confidence": 0.4,
         }
@@ -223,6 +459,7 @@ def classify_from_caption(caption: str | None) -> dict | None:
                 "kind": "incident",
                 "category": name,
                 "summary": text[:180],
+                "headline": headline_for("incident", name, text, text),
                 "place_text": text,
                 "confidence": 0.45,
             }
@@ -233,6 +470,7 @@ def classify_from_caption(caption: str | None) -> dict | None:
         "kind": "incident",
         "category": category,
         "summary": text[:180],
+        "headline": headline_for("incident", category, text, text),
         "place_text": text,
         "confidence": 0.35,
     }
@@ -272,6 +510,14 @@ def classify_image(image: bytes, caption: str | None) -> dict:
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     with httpx.Client(timeout=60) as client:
         response = client.post(OPENAI_URL, headers=headers, json=payload)
+        if not response.is_success:
+            detail = ""
+            try:
+                err = response.json().get("error") or {}
+                detail = str(err.get("code") or err.get("type") or response.status_code)
+            except Exception:
+                detail = str(response.status_code)
+            print(f"openai vision failed: {response.status_code} {detail}")
         response.raise_for_status()
         body = response.json()
     raw = body["choices"][0]["message"]["content"]
@@ -286,10 +532,12 @@ def classify_image(image: bytes, caption: str | None) -> dict:
         category = None
     if kind == "street_light":
         category = None
+    summary = str(parsed.get("summary") or caption or "Citizen photo report")[:240]
     return {
         "kind": kind,
         "category": category,
-        "summary": str(parsed.get("summary") or caption or "Citizen photo report")[:240],
+        "summary": summary,
+        "headline": headline_for(kind, category if isinstance(category, str) else None, caption, summary),
         "place_text": parsed.get("place_text") or caption,
         "confidence": float(parsed.get("confidence") or 0),
     }
@@ -322,11 +570,13 @@ def resolve_location(
     caption_coords = coords_from_caption(caption)
     if caption_coords:
         return caption_coords
-    for candidate in (place_text, caption):
+    for candidate in place_candidates(caption, place_text):
         geocoded = geocode_place(candidate)
         if geocoded:
             return geocoded
-    return _default_coords()
+    if image:
+        return _default_coords()
+    return None
 
 
 def persist_report(
@@ -338,18 +588,21 @@ def persist_report(
     lng: float,
     timestamp: datetime,
     summary: str,
+    headline: str,
 ) -> dict:
     if not _in_nyc(lat, lng):
         raise ValueError("location is outside New York City")
     timestamp = as_nyc(timestamp)
     if kind == "street_light":
         severity = DARK["Street Light Out"]
+        headline = headline or "Street light out"
         record = {
             "source_id": source_id,
             "lat": lat,
             "lng": lng,
             "severity": severity,
             "timestamp": timestamp,
+            "headline": headline,
         }
         with pool.connection() as conn:
             conn.execute(LIGHT_UPSERT, record)
@@ -362,11 +615,13 @@ def persist_report(
             "lat": lat,
             "lng": lng,
             "timestamp": timestamp,
+            "headline": headline,
             "summary": summary,
         }
     if category not in INCIDENT_CATEGORIES:
         raise ValueError("unsupported incident category")
     severity = CATEGORY_SEVERITY[category]
+    headline = headline or _HEADLINE[category]
     record = {
         "source_id": source_id,
         "lat": lat,
@@ -374,6 +629,7 @@ def persist_report(
         "category": category,
         "severity": severity,
         "timestamp": timestamp,
+        "headline": headline,
     }
     with pool.connection() as conn:
         conn.execute(INCIDENT_UPSERT, record)
@@ -386,6 +642,7 @@ def persist_report(
         "lat": lat,
         "lng": lng,
         "timestamp": timestamp,
+        "headline": headline,
         "summary": summary,
     }
 
@@ -399,20 +656,29 @@ def ingest_photo_report(
     message_id: str | None = None,
 ) -> dict:
     if not image and not (caption or "").strip():
-        return {"status": "need_photo", "reply": "Send a photo of the street, crash, or crime, plus a cross-street if you can."}
+        return {
+            "status": "need_photo",
+            "reply": "Hi — want to report something? Send a photo of the street, crash, or whatever you saw, plus a cross-street if you can.",
+        }
 
     classification: dict | None = None
     if image:
         try:
             classification = classify_image(image, caption)
         except UnidentifiedImageError:
-            return {"status": "bad_image", "reply": "I could not read that image. Try a JPEG or PNG still."}
+            return {
+                "status": "bad_image",
+                "reply": "I couldn't open that image. A still JPEG or PNG usually works best.",
+            }
         except RuntimeError as exc:
             return {"status": "need_vision", "reply": str(exc)}
         except httpx.HTTPError:
             fallback = classify_from_caption(caption)
             if fallback is None:
-                return {"status": "vision_failed", "reply": "I could not read that photo just now. Describe what happened and the cross-street."}
+                return {
+                    "status": "vision_failed",
+                    "reply": "I couldn't read that photo just now. Tell me what happened and a cross-street and I'll try again.",
+                }
             classification = fallback
     else:
         classification = classify_from_caption(caption)
@@ -420,7 +686,7 @@ def ingest_photo_report(
     if classification is None or classification["kind"] == "unrelated":
         return {
             "status": "unrelated",
-            "reply": "I only log street lamps out and the seven mapped categories (violent, property, disorder, alarm, traffic, medical, admin). Send another photo if this is one of those.",
+            "reply": "I'm not sure that matches a street lamp, crash, or one of the mapped incidents. If it is, send another photo or a short description of what you saw.",
         }
 
     coords = resolve_location(
@@ -436,27 +702,34 @@ def ingest_photo_report(
             "kind": classification["kind"],
             "category": classification.get("category"),
             "summary": classification.get("summary"),
-            "reply": "Got the photo. Where was this? Reply with a cross-street like 'Broadway and 116th' or coordinates.",
+            "reply": "Got it. Where in NYC was this? A cross-street like Broadway and 116th is enough.",
         }
 
     source_id = f"photon:{(message_id or uuid.uuid4().hex)}"
+    kind = classification["kind"]
+    category = classification.get("category")
+    summary = str(classification.get("summary") or caption or "Citizen report")
+    headline = str(
+        classification.get("headline")
+        or headline_for(kind, category if isinstance(category, str) else None, caption, summary)
+    )
     try:
         stored = persist_report(
             source_id=source_id,
-            kind=classification["kind"],
-            category=classification.get("category"),
+            kind=kind,
+            category=category,
             lat=coords[0],
             lng=coords[1],
-            timestamp=report_timestamp(),
-            summary=str(classification.get("summary") or "Citizen photo report"),
+            timestamp=report_timestamp(image),
+            summary=summary,
+            headline=headline,
         )
     except ValueError as exc:
         return {"status": "rejected", "reply": str(exc)}
 
-    label = "street light out" if stored["kind"] == "street_light" else stored["category"]
     stored["status"] = "stored"
     stored["reply"] = (
-        f"Logged as {label} at {stored['lat']:.5f}, {stored['lng']:.5f}. "
-        "It is on the map for the current replay clock."
+        f"Thanks — I logged that as {stored.get('headline') or headline} "
+        f"at {stored['lat']:.5f}, {stored['lng']:.5f}. It's on the map."
     )
     return stored

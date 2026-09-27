@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 from psycopg_pool import ConnectionPool
 
@@ -14,7 +15,10 @@ def _apply_env_file(env_path: Path) -> None:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"'))
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export ") :].strip()
+        os.environ.setdefault(key, value.strip().strip('"').strip("'"))
 
 
 def _load_local_env() -> None:
@@ -27,6 +31,18 @@ def _load_local_env() -> None:
 
 def _database_url() -> str:
     url = os.environ.get("DATABASE_URL") or os.environ.get("TIMESCALE_SERVICE_URL")
+    if not url:
+        host = os.environ.get("PGHOST")
+        user = os.environ.get("PGUSER")
+        password = os.environ.get("PGPASSWORD")
+        database = os.environ.get("PGDATABASE")
+        if host and user and password and database:
+            port = os.environ.get("PGPORT", "5432")
+            sslmode = os.environ.get("PGSSLMODE", "require")
+            url = (
+                f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}"
+                f"@{host}:{port}/{database}?sslmode={sslmode}"
+            )
     if not url:
         return "postgresql://localhost:5432/safepath"
     if url.startswith("postgres://"):
