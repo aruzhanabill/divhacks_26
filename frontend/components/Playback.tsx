@@ -1,5 +1,7 @@
 "use client";
 
+/// <reference types="google.maps" />
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMap } from "@vis.gl/react-google-maps";
 import { useFollowLive, usePublishFollow, type RevealedCall } from "@/lib/follow";
@@ -271,9 +273,9 @@ export function Playback() {
     let lastPhotonPan = "";
     let heatSignature = "";
     let Pin: typeof google.maps.marker.AdvancedMarkerElement | null = null;
-    void google.maps.importLibrary("marker").then((lib) => {
+    void google.maps.importLibrary("marker").then((lib: google.maps.MarkerLibrary) => {
       if (cancelled) return;
-      Pin = (lib as google.maps.MarkerLibrary).AdvancedMarkerElement;
+      Pin = lib.AdvancedMarkerElement;
     });
 
     const draw = (simMsValue: number) => {
